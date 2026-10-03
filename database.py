@@ -1,9 +1,8 @@
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "facc_music.db")
-SQL_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "..", "db.sql")
-
+DB_PATH = os.path.join(os.path.dirname(__file__), "facc_music.db") 
+SQL_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "db.sql")
 def get_db_connection():
     """Retorna una conexión activa a la base de datos SQLite."""
     conn = sqlite3.connect(DB_PATH)
