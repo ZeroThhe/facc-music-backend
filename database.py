@@ -1,24 +1,59 @@
-import sqlite3
+"""
+Conexiones a las dos bases de datos de FACC Music:
+  - PostgreSQL -> usuarios, pedidos y detalles_pedido (datos transaccionales / relacionales)
+  - MongoDB    -> categorias y productos (catálogo en documentos)
+"""
 import os
+import json
+import psycopg
+from psycopg.rows import dict_row
+from pymongo import MongoClient
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "facc_music.db") 
-SQL_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "db.sql")
+BASE_DIR = os.path.dirname(__file__)
+
+# Se pueden cambiar con variables de entorno si tu usuario/contraseña son otros
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/facc_music")
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+MONGO_DB = os.getenv("MONGO_DB", "facc_music")
+
+SQL_SCRIPT_PATH = os.path.join(BASE_DIR, "db.sql")
+CATALOGO_PATH = os.path.join(BASE_DIR, "catalogo.json")
+
+_mongo_client = MongoClient(MONGO_URL)
+
+
 def get_db_connection():
-    """Retorna una conexión activa a la base de datos SQLite."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Conexión a PostgreSQL. Las filas regresan como diccionarios (r["campo"])."""
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+def get_mongo():
+    """Base de datos de MongoDB (colecciones: categorias, productos)."""
+    return _mongo_client[MONGO_DB]
+
 
 def init_db():
-    """Inicializa la base de datos si no existe ejecutando db.sql."""
-    if not os.path.exists(DB_PATH):
-        print("==> Inicializando base de datos desde db.sql...")
-        conn = sqlite3.connect(DB_PATH)
-        if os.path.exists(SQL_SCRIPT_PATH):
-            with open(SQL_SCRIPT_PATH, "r", encoding="utf-8") as f:
-                conn.executescript(f.read())
-            conn.commit()
-            print("[OK] Base de datos FACC Music inicializada correctamente.")
-        else:
-            print("[WARN] db.sql no encontrado.")
-        conn.close()
+    """Crea las tablas en PostgreSQL y carga el catálogo en MongoDB si están vacíos."""
+    # --- PostgreSQL ---
+    conn = get_db_connection()
+    existe = conn.execute("SELECT to_regclass('public.usuarios') AS t").fetchone()["t"]
+    if not existe:
+        print("==> Creando tablas de PostgreSQL desde db.sql...")
+        with open(SQL_SCRIPT_PATH, "r", encoding="utf-8") as f:
+            conn.execute(f.read())
+        conn.commit()
+        print("[OK] PostgreSQL listo.")
+    conn.close()
+
+    # --- MongoDB ---
+    db = get_mongo()
+    if db.productos.count_documents({}) == 0:
+        print("==> Cargando catálogo en MongoDB desde catalogo.json...")
+        with open(CATALOGO_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        db.categorias.delete_many({})
+        db.categorias.insert_many(data["categorias"])
+        db.productos.insert_many(data["productos"])
+        db.categorias.create_index("id", unique=True)
+        db.productos.create_index("id", unique=True)
+        print("[OK] MongoDB listo.")

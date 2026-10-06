@@ -1,7 +1,14 @@
 # FACC Music — Backend GraphQL
 
 Servidor GraphQL para el e-commerce de discos, vinilos y CDs **FACC Music**.
-Construido con **Python 3**, **FastAPI**, **Strawberry GraphQL** y **SQLite** (`db.sql`).
+Construido con **Python 3**, **FastAPI**, **Strawberry GraphQL**, **PostgreSQL** y **MongoDB**.
+
+| Base de datos | Qué guarda | Archivo semilla |
+|---|---|---|
+| PostgreSQL | usuarios, pedidos, detalles_pedido | `db.sql` |
+| MongoDB | categorias, productos (catálogo) | `catalogo.json` |
+
+Al arrancar, el servidor crea las tablas y carga el catálogo automáticamente si están vacíos.
 
 **Alumna:** Fátima Martín del Campo Castellanos (Registro: 22300884)  
 **Materia:** Programación Web 2 (PWII) · **Profesor:** Kegovc  
@@ -12,7 +19,17 @@ Construido con **Python 3**, **FastAPI**, **Strawberry GraphQL** y **SQLite** (`
 ## 🚀 Requisitos e Instalación
 
 1. **Python 3.9+** instalado.
-2. Instalar las dependencias necesarias:
+2. **PostgreSQL** corriendo en `localhost:5432` con una base vacía llamada `facc_music`:
+   ```bash
+   psql -U postgres -c "CREATE DATABASE facc_music;"
+   ```
+3. **MongoDB** corriendo en `localhost:27017` (la base `facc_music` se crea sola).
+4. Si tu usuario/contraseña de PostgreSQL no es `postgres/postgres`, define la variable:
+   ```bash
+   # Windows (PowerShell)
+   $env:DATABASE_URL="postgresql://USUARIO:CONTRASEÑA@localhost:5432/facc_music"
+   ```
+5. Instalar las dependencias necesarias:
    ```bash
    pip install -r requirements.txt
    ```
@@ -77,8 +94,7 @@ query {
 ### Mutation: Registrar Pedido
 ```graphql
 mutation {
-  registrarPedido(input: {
-    usuarioId: 1,
+  registrarPedido(datos: {
     direccionEnvio: "Av. Universidad #120, Guadalajara",
     metodoPago: "Tarjeta de Crédito",
     detalles: [

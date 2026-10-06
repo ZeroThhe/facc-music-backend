@@ -1,0 +1,306 @@
+{
+  "categorias": [
+    {
+      "id": 1,
+      "nombre": "Rock & Clásicos (LP)",
+      "descripcion": "Prensados audiófilos en acetato de 180g de leyendas del rock",
+      "imagen": "https://images.unsplash.com/photo-1539375665275-f9de415ef9ac?w=600"
+    },
+    {
+      "id": 2,
+      "nombre": "Pop & Hits (LP / CD)",
+      "descripcion": "Grandes producciones pop, melodías pegajosas y ediciones especiales",
+      "imagen": "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600"
+    },
+    {
+      "id": 3,
+      "nombre": "K-Pop & Asian Pop",
+      "descripcion": "Ediciones especial boxset con fotolibros, tarjetas y coleccionables",
+      "imagen": "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600"
+    },
+    {
+      "id": 4,
+      "nombre": "Hip-Hop & R&B (LP)",
+      "descripcion": "Álbumes icónicos del género en doble vinilo prensado pesado",
+      "imagen": "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600"
+    },
+    {
+      "id": 5,
+      "nombre": "Jazz, Blues & Soul",
+      "descripcion": "Interpretaciones acústicas cálidas, saxofón e impresiones de alta fidelidad",
+      "imagen": "https://images.unsplash.com/photo-1511192336575-5a79af67a629?w=600"
+    },
+    {
+      "id": 6,
+      "nombre": "Metal & Alternative",
+      "descripcion": "Discos potentes de metal, grunge e indie rock alternativo",
+      "imagen": "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600"
+    }
+  ],
+  "productos": [
+    {
+      "id": 1,
+      "nombre": "The Dark Side of the Moon",
+      "artista": "Pink Floyd",
+      "formato": "Vinilo 180g Remastered",
+      "precio": 850.0,
+      "imagen": "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=600",
+      "stock": 20,
+      "destacado": true,
+      "categoria_id": 1
+    },
+    {
+      "id": 2,
+      "nombre": "Abbey Road (Edición 50 Aniversario)",
+      "artista": "The Beatles",
+      "formato": "Vinilo 180g",
+      "precio": 899.0,
+      "imagen": "https://images.unsplash.com/photo-1539375665275-f9de415ef9ac?w=600",
+      "stock": 15,
+      "destacado": true,
+      "categoria_id": 1
+    },
+    {
+      "id": 3,
+      "nombre": "Rumours (Edición Limitada)",
+      "artista": "Fleetwood Mac",
+      "formato": "Vinilo Transparente",
+      "precio": 700.0,
+      "imagen": "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600",
+      "stock": 12,
+      "destacado": false,
+      "categoria_id": 1
+    },
+    {
+      "id": 4,
+      "nombre": "Led Zeppelin IV",
+      "artista": "Led Zeppelin",
+      "formato": "Vinilo 180g Remaster",
+      "precio": 660.0,
+      "imagen": "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600",
+      "stock": 18,
+      "destacado": false,
+      "categoria_id": 1
+    },
+    {
+      "id": 5,
+      "nombre": "1989 (Taylor Version)",
+      "artista": "Taylor Swift",
+      "formato": "2LP Crystal Pink",
+      "precio": 980.0,
+      "imagen": "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600",
+      "stock": 25,
+      "destacado": true,
+      "categoria_id": 2
+    },
+    {
+      "id": 6,
+      "nombre": "Future Nostalgia (Moonlight Edition)",
+      "artista": "Dua Lipa",
+      "formato": "Vinilo Neon Pink",
+      "precio": 700.0,
+      "imagen": "https://images.unsplash.com/photo-1465847899084-d164df4dedc6?w=600",
+      "stock": 14,
+      "destacado": false,
+      "categoria_id": 2
+    },
+    {
+      "id": 7,
+      "nombre": "Random Access Memories (10th Anniversary)",
+      "artista": "Daft Punk",
+      "formato": "CD Deluxe 2-Disc",
+      "precio": 499.0,
+      "imagen": "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600",
+      "stock": 30,
+      "destacado": true,
+      "categoria_id": 2
+    },
+    {
+      "id": 8,
+      "nombre": "Fine Line",
+      "artista": "Harry Styles",
+      "formato": "2LP Vinilo Negro",
+      "precio": 790.0,
+      "imagen": "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=600",
+      "stock": 16,
+      "destacado": false,
+      "categoria_id": 2
+    },
+    {
+      "id": 9,
+      "nombre": "PROOF (Standard Edition)",
+      "artista": "BTS",
+      "formato": "3CD BoxSet Deluxe",
+      "precio": 1350.0,
+      "imagen": "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600",
+      "stock": 10,
+      "destacado": true,
+      "categoria_id": 3
+    },
+    {
+      "id": 10,
+      "nombre": "BORN PINK",
+      "artista": "BLACKPINK",
+      "formato": "Target Exclusive CD",
+      "precio": 570.0,
+      "imagen": "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600",
+      "stock": 15,
+      "destacado": false,
+      "categoria_id": 3
+    },
+    {
+      "id": 11,
+      "nombre": "Get Up (Bunny Beach Bag Ver.)",
+      "artista": "NewJeans",
+      "formato": "CD Boxset Special",
+      "precio": 640.0,
+      "imagen": "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600",
+      "stock": 12,
+      "destacado": true,
+      "categoria_id": 3
+    },
+    {
+      "id": 12,
+      "nombre": "MAXIDENT (Limited Edition)",
+      "artista": "Stray Kids",
+      "formato": "CD + Photobook",
+      "precio": 540.0,
+      "imagen": "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600",
+      "stock": 20,
+      "destacado": false,
+      "categoria_id": 3
+    },
+    {
+      "id": 13,
+      "nombre": "To Pimp a Butterfly",
+      "artista": "Kendrick Lamar",
+      "formato": "2LP Vinilo 180g",
+      "precio": 840.0,
+      "imagen": "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600",
+      "stock": 14,
+      "destacado": true,
+      "categoria_id": 4
+    },
+    {
+      "id": 14,
+      "nombre": "Blonde (Official Repress)",
+      "artista": "Frank Ocean",
+      "formato": "2LP Vinilo Negro",
+      "precio": 1300.0,
+      "imagen": "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600",
+      "stock": 8,
+      "destacado": true,
+      "categoria_id": 4
+    },
+    {
+      "id": 15,
+      "nombre": "IGOR",
+      "artista": "Tyler, The Creator",
+      "formato": "Vinilo Verde Menta",
+      "precio": 730.0,
+      "imagen": "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600",
+      "stock": 11,
+      "destacado": false,
+      "categoria_id": 4
+    },
+    {
+      "id": 16,
+      "nombre": "The College Dropout",
+      "artista": "Kanye West",
+      "formato": "2LP Gatefold",
+      "precio": 760.0,
+      "imagen": "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600",
+      "stock": 16,
+      "destacado": false,
+      "categoria_id": 4
+    },
+    {
+      "id": 17,
+      "nombre": "Kind of Blue",
+      "artista": "Miles Davis",
+      "formato": "Vinilo Audiófilo 180g",
+      "precio": 860.0,
+      "imagen": "https://images.unsplash.com/photo-1511192336575-5a79af67a629?w=600",
+      "stock": 8,
+      "destacado": true,
+      "categoria_id": 5
+    },
+    {
+      "id": 18,
+      "nombre": "A Love Supreme",
+      "artista": "John Coltrane",
+      "formato": "Vinilo Impulse 180g",
+      "precio": 790.0,
+      "imagen": "https://images.unsplash.com/photo-1461360370896-922624d12aa1?w=600",
+      "stock": 10,
+      "destacado": false,
+      "categoria_id": 5
+    },
+    {
+      "id": 19,
+      "nombre": "At Last! (Edición Especial)",
+      "artista": "Etta James",
+      "formato": "Vinilo Azul Translúcido",
+      "precio": 560.0,
+      "imagen": "https://images.unsplash.com/photo-1511192336575-5a79af67a629?w=600",
+      "stock": 9,
+      "destacado": false,
+      "categoria_id": 5
+    },
+    {
+      "id": 20,
+      "nombre": "Blue Train (Tone Poet Series)",
+      "artista": "John Coltrane",
+      "formato": "Vinilo Audiófilo LP",
+      "precio": 900.0,
+      "imagen": "https://images.unsplash.com/photo-1461360370896-922624d12aa1?w=600",
+      "stock": 7,
+      "destacado": false,
+      "categoria_id": 5
+    },
+    {
+      "id": 21,
+      "nombre": "Master of Puppets (Remastered)",
+      "artista": "Metallica",
+      "formato": "Vinilo 180g Heavy",
+      "precio": 640.0,
+      "imagen": "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600",
+      "stock": 22,
+      "destacado": true,
+      "categoria_id": 6
+    },
+    {
+      "id": 22,
+      "nombre": "Nevermind (30th Anniversary)",
+      "artista": "Nirvana",
+      "formato": "Vinilo LP + 7 inch",
+      "precio": 690.0,
+      "imagen": "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600",
+      "stock": 17,
+      "destacado": true,
+      "categoria_id": 6
+    },
+    {
+      "id": 23,
+      "nombre": "OK Computer (OKNOTOK 1997-2017)",
+      "artista": "Radiohead",
+      "formato": "3LP 180g Box",
+      "precio": 920.0,
+      "imagen": "https://images.unsplash.com/photo-1539375665275-f9de415ef9ac?w=600",
+      "stock": 13,
+      "destacado": false,
+      "categoria_id": 6
+    },
+    {
+      "id": 24,
+      "nombre": "Toxicity",
+      "artista": "System Of A Down",
+      "formato": "Vinilo Heavyweight",
+      "precio": 580.0,
+      "imagen": "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600",
+      "stock": 19,
+      "destacado": false,
+      "categoria_id": 6
+    }
+  ]
+}

@@ -8,7 +8,8 @@ import enum
 from typing import List, Optional
 import strawberry
 from strawberry.types import Info
-from database import get_db_connection
+import re
+from database import get_db_connection, get_mongo
 from auth import hash_password, IsAuthenticated, IsAdmin
 
 
@@ -19,6 +20,30 @@ from auth import hash_password, IsAuthenticated, IsAdmin
 class RolEnum(enum.Enum):
     CLIENTE = "CLIENTE"
     ADMIN = "ADMIN"
+
+
+# HELPERS: convertir documentos de MongoDB en tipos GraphQL
+
+def producto_desde_doc(d) -> "Producto":
+    return Producto(
+        id=d["id"],
+        nombre=d["nombre"],
+        artista=d["artista"],
+        formato=d["formato"],
+        precio=float(d["precio"]),
+        imagen=d["imagen"],
+        stock=d["stock"],
+        destacado=bool(d["destacado"]),
+        categoria_id=d["categoria_id"]
+    )
+
+def categoria_desde_doc(d) -> "Categoria":
+    return Categoria(
+        id=d["id"],
+        nombre=d["nombre"],
+        descripcion=d.get("descripcion"),
+        imagen=d.get("imagen")
+    )
 
 
 # TIPOS GRAPHQL (ENTIDADES CON RESOLUTORES ANIDADOS)
@@ -33,25 +58,8 @@ class Categoria:
 
     @strawberry.field(description="Resolutor anidado: Obtener los productos de esta categoría")
     def productos(self) -> List["Producto"]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM productos WHERE categoria_id = ?", (self.id,))
-        rows = cursor.fetchall()
-        conn.close()
-        return [
-            Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-            for r in rows
-        ]
+        docs = get_mongo().productos.find({"categoria_id": self.id}).sort("id", 1)
+        return [producto_desde_doc(d) for d in docs]
 
 @strawberry.type(description="Entidad Producto (Álbum / Vinilo / CD)")
 class Producto:
@@ -67,19 +75,8 @@ class Producto:
 
     @strawberry.field(description="Resolutor anidado: Obtener la Categoría del producto")
     def categoria(self) -> Optional[Categoria]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categorias WHERE id = ?", (self.categoria_id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Categoria(
-                id=r["id"],
-                nombre=r["nombre"],
-                descripcion=r["descripcion"],
-                imagen=r["imagen"]
-            )
-        return None
+        d = get_mongo().categorias.find_one({"id": self.categoria_id})
+        return categoria_desde_doc(d) if d else None
 
 @strawberry.type(description="Resultado de consulta paginada de productos")
 class ProductoPaginado:
@@ -103,24 +100,8 @@ class DetallePedido:
 
     @strawberry.field(description="Resolutor anidado: Producto comprado en este renglón")
     def producto(self) -> Optional[Producto]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM productos WHERE id = ?", (self.producto_id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-        return None
+        d = get_mongo().productos.find_one({"id": self.producto_id})
+        return producto_desde_doc(d) if d else None
 
 @strawberry.type(description="Entidad Pedido (Orden de Compra)")
 class Pedido:
@@ -136,7 +117,7 @@ class Pedido:
     def usuario(self) -> Optional[Usuario]:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (self.usuario_id,))
+        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (self.usuario_id,))
         r = cursor.fetchone()
         conn.close()
         if r:
@@ -152,7 +133,7 @@ class Pedido:
     def detalles(self) -> List[DetallePedido]:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM detalles_pedido WHERE pedido_id = ?", (self.id,))
+        cursor.execute("SELECT * FROM detalles_pedido WHERE pedido_id = %s ORDER BY id", (self.id,))
         rows = cursor.fetchall()
         conn.close()
         return [
@@ -207,36 +188,13 @@ class RegistroInput:
 class Query:
     @strawberry.field(description="Listar todas las categorías con sus productos anidados")
     def categorias(self) -> List[Categoria]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categorias")
-        rows = cursor.fetchall()
-        conn.close()
-        return [
-            Categoria(
-                id=r["id"],
-                nombre=r["nombre"],
-                descripcion=r["descripcion"],
-                imagen=r["imagen"]
-            )
-            for r in rows
-        ]
+        docs = get_mongo().categorias.find().sort("id", 1)
+        return [categoria_desde_doc(d) for d in docs]
 
     @strawberry.field(description="Consultar una categoría por su ID")
     def categoria(self, id: int) -> Optional[Categoria]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categorias WHERE id = ?", (id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Categoria(
-                id=r["id"],
-                nombre=r["nombre"],
-                descripcion=r["descripcion"],
-                imagen=r["imagen"]
-            )
-        return None
+        d = get_mongo().categorias.find_one({"id": id})
+        return categoria_desde_doc(d) if d else None
 
     @strawberry.field(description="Listar el catálogo de productos con paginación y filtros por categoría o búsqueda")
     def productos(
@@ -246,70 +204,22 @@ class Query:
         categoriaId: Optional[int] = None,
         busqueda: Optional[str] = None
     ) -> ProductoPaginado:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        query_sql = "SELECT * FROM productos WHERE 1=1"
-        count_sql = "SELECT COUNT(*) as total FROM productos WHERE 1=1"
-        params = []
-
+        filtro = {}
         if categoriaId:
-            query_sql += " AND categoria_id = ?"
-            count_sql += " AND categoria_id = ?"
-            params.append(categoriaId)
-
+            filtro["categoria_id"] = categoriaId
         if busqueda:
-            query_sql += " AND (nombre LIKE ? OR artista LIKE ?)"
-            count_sql += " AND (nombre LIKE ? OR artista LIKE ?)"
-            search_param = f"%{busqueda}%"
-            params.extend([search_param, search_param])
+            patron = {"$regex": re.escape(busqueda), "$options": "i"}
+            filtro["$or"] = [{"nombre": patron}, {"artista": patron}]
 
-        cursor.execute(count_sql, params)
-        total = cursor.fetchone()["total"]
-
-        query_sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-
-        cursor.execute(query_sql, params)
-        rows = cursor.fetchall()
-        conn.close()
-
-        lista_prods = [
-            Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-            for r in rows
-        ]
-        return ProductoPaginado(total=total, productos=lista_prods)
+        col = get_mongo().productos
+        total = col.count_documents(filtro)
+        docs = col.find(filtro).sort("id", -1).skip(offset or 0).limit(limit or 20)
+        return ProductoPaginado(total=total, productos=[producto_desde_doc(d) for d in docs])
 
     @strawberry.field(description="Consultar un producto específico por ID")
     def producto(self, id: int) -> Optional[Producto]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM productos WHERE id = ?", (id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-        return None
+        d = get_mongo().productos.find_one({"id": id})
+        return producto_desde_doc(d) if d else None
 
     @strawberry.field(description="Usuario de la sesión actual (null si no hay token o es inválido)")
     def me(self, info: Info) -> Optional[Usuario]:
@@ -329,13 +239,13 @@ class Query:
         if user["rol"] == "ADMIN":
             cursor.execute("SELECT * FROM pedidos ORDER BY fecha DESC")
         else:
-            cursor.execute("SELECT * FROM pedidos WHERE usuario_id = ? ORDER BY fecha DESC", (user["id"],))
+            cursor.execute("SELECT * FROM pedidos WHERE usuario_id = %s ORDER BY fecha DESC", (user["id"],))
         rows = cursor.fetchall()
         conn.close()
         return [
             Pedido(
                 id=r["id"],
-                fecha=r["fecha"],
+                fecha=str(r["fecha"]),
                 total=float(r["total"]),
                 status=r["status"],
                 usuario_id=r["usuario_id"],
@@ -362,32 +272,35 @@ class Mutation:
         conn = get_db_connection()
         try:
             cur = conn.execute(
-                "INSERT INTO usuarios (nombre, email, password, rol) VALUES (?, ?, ?, 'CLIENTE')",
+                "INSERT INTO usuarios (nombre, email, password, rol) VALUES (%s, %s, %s, 'CLIENTE') RETURNING id",
                 (datos.nombre.strip(), email, hash_password(datos.password))
             )
+            uid = cur.fetchone()["id"]
             conn.commit()
         except Exception:
+            conn.rollback()
             conn.close()
             raise Exception("Ese correo ya está registrado")
 
-        uid = cur.lastrowid
         conn.close()
         return Usuario(id=uid, nombre=datos.nombre.strip(), email=email, rol=RolEnum.CLIENTE)
 
     @strawberry.mutation(description="Registrar un nuevo producto en el catálogo", permission_classes=[IsAdmin])
     def registrar_producto(self, input: ProductoInput) -> Producto:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO productos (nombre, artista, formato, precio, imagen, stock, destacado, categoria_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (input.nombre, input.artista, input.formato, input.precio, input.imagen, input.stock, int(input.destacado), input.categoria_id)
-        )
-        new_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+        col = get_mongo().productos
+        ultimo = col.find_one(sort=[("id", -1)])
+        new_id = (ultimo["id"] + 1) if ultimo else 1
+        col.insert_one({
+            "id": new_id,
+            "nombre": input.nombre,
+            "artista": input.artista,
+            "formato": input.formato,
+            "precio": input.precio,
+            "imagen": input.imagen,
+            "stock": input.stock,
+            "destacado": input.destacado,
+            "categoria_id": input.categoria_id,
+        })
         return Producto(
             id=new_id,
             nombre=input.nombre,
@@ -402,18 +315,18 @@ class Mutation:
 
     @strawberry.mutation(description="Actualizar los datos de un producto existente", permission_classes=[IsAdmin])
     def actualizar_producto(self, id: int, input: ProductoInput) -> Optional[Producto]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE productos
-            SET nombre=?, artista=?, formato=?, precio=?, imagen=?, stock=?, destacado=?, categoria_id=?
-            WHERE id=?
-            """,
-            (input.nombre, input.artista, input.formato, input.precio, input.imagen, input.stock, int(input.destacado), input.categoria_id, id)
-        )
-        conn.commit()
-        conn.close()
+        res = get_mongo().productos.update_one({"id": id}, {"$set": {
+            "nombre": input.nombre,
+            "artista": input.artista,
+            "formato": input.formato,
+            "precio": input.precio,
+            "imagen": input.imagen,
+            "stock": input.stock,
+            "destacado": input.destacado,
+            "categoria_id": input.categoria_id,
+        }})
+        if res.matched_count == 0:
+            return None
         return Producto(
             id=id,
             nombre=input.nombre,
@@ -428,13 +341,8 @@ class Mutation:
 
     @strawberry.mutation(description="Eliminar un producto del catálogo por su ID", permission_classes=[IsAdmin])
     def eliminar_producto(self, id: int) -> bool:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM productos WHERE id = ?", (id,))
-        rows_deleted = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return rows_deleted > 0
+        res = get_mongo().productos.delete_one({"id": id})
+        return res.deleted_count > 0
 
     @strawberry.mutation(
         description="Registrar un pedido completo con sus renglones del carrito",
@@ -447,33 +355,37 @@ class Mutation:
 
         total = sum(d.cantidad * d.precio_unitario for d in datos.detalles)
 
+        # 1) Pedido y renglones en PostgreSQL
         cursor.execute(
             """
             INSERT INTO pedidos (total, status, usuario_id, direccion_envio, metodo_pago)
-            VALUES (?, 'COMPLETADO', ?, ?, ?)
+            VALUES (%s, 'COMPLETADO', %s, %s, %s)
+            RETURNING id, fecha
             """,
             (total, usuario_id, datos.direccion_envio, datos.metodo_pago)
         )
-        pedido_id = cursor.lastrowid
+        fila = cursor.fetchone()
+        pedido_id, fecha = fila["id"], str(fila["fecha"])
 
         for d in datos.detalles:
             cursor.execute(
                 """
                 INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
                 """,
                 (pedido_id, d.producto_id, d.cantidad, d.precio_unitario)
             )
-            cursor.execute(
-                "UPDATE productos SET stock = MAX(0, stock - ?) WHERE id = ?",
-                (d.cantidad, d.producto_id)
-            )
 
         conn.commit()
-
-        cursor.execute("SELECT fecha FROM pedidos WHERE id = ?", (pedido_id,))
-        fecha = cursor.fetchone()["fecha"]
         conn.close()
+
+        # 2) Descontar stock en MongoDB (sin bajar de 0)
+        productos = get_mongo().productos
+        for d in datos.detalles:
+            productos.update_one(
+                {"id": d.producto_id},
+                [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", d.cantidad]}]}}}]
+            )
 
         return Pedido(
             id=pedido_id,

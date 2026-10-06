@@ -50,7 +50,7 @@ def get_user_from_request(request: Request):
         return None
 
     conn = get_db_connection()
-    r = conn.execute("SELECT id, nombre, email, rol FROM usuarios WHERE id = ?", (user_id,)).fetchone()
+    r = conn.execute("SELECT id, nombre, email, rol FROM usuarios WHERE id = %s", (user_id,)).fetchone()
     conn.close()
     return dict(r) if r else None
 
@@ -65,7 +65,7 @@ def migrar_passwords():
     conn = get_db_connection()
     for r in conn.execute("SELECT id, password FROM usuarios").fetchall():
         if not r["password"].startswith("$2"):
-            conn.execute("UPDATE usuarios SET password = ? WHERE id = ?",
+            conn.execute("UPDATE usuarios SET password = %s WHERE id = %s",
                          (hash_password(r["password"]), r["id"]))
     conn.commit()
     conn.close()
