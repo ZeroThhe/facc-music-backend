@@ -43,6 +43,9 @@ def init_db():
             conn.execute(f.read())
         conn.commit()
         print("[OK] PostgreSQL listo.")
+    # Migración: columna para el ID del cobro de PayPal / Mercado Pago
+    conn.execute("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS referencia_pago VARCHAR(100)")
+    conn.commit()
     conn.close()
 
     # --- MongoDB ---

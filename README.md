@@ -91,20 +91,22 @@ query {
 }
 ```
 
-### Mutation: Registrar Pedido
+### Mutation: Registrar Pedido (queda PENDIENTE hasta que se paga)
 ```graphql
 mutation {
   registrarPedido(datos: {
     direccionEnvio: "Av. Universidad #120, Guadalajara",
-    metodoPago: "Tarjeta de Crédito",
-    detalles: [
-      { productoId: 1, cantidad: 1, precioUnitario: 899.00 }
-    ]
-  }) {
-    id
-    fecha
-    total
-    status
-  }
+    metodoPago: "PayPal",
+    detalles: [{ productoId: 1, cantidad: 1 }]
+  }) { id total status }
 }
 ```
+El usuario sale del token y los precios los toma el servidor de MongoDB.
+
+## 💳 Pagos (PayPal y Mercado Pago)
+
+1. Copia `.env.example` como `.env` (en esta carpeta `back/`) y llena credenciales de prueba y URLs de las BD.
+2. Flujo PayPal: `registrarPedido` → `crearOrdenPaypal(pedidoId)` → el comprador aprueba → `capturarPagoPaypal(pedidoId, orderId)`.
+3. Flujo Mercado Pago: `registrarPedido` → `crearPagoMercadoPago(pedidoId)` (regresa URL) → el comprador paga y regresa → `confirmarPagoMercadoPago(pedidoId, paymentId)`.
+
+El servidor consulta a la pasarela, verifica monto, moneda y pedido, y solo entonces marca **PAGADO** (PostgreSQL) y descuenta stock (MongoDB).

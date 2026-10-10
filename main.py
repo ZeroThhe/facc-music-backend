@@ -2,6 +2,10 @@
 Servidor Principal FastAPI con Strawberry GraphQL para FACC Music.
 """
 
+import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))  # credenciales y URLs de BD (antes de importar lo demás)
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm

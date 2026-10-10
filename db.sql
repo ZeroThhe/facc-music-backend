@@ -20,10 +20,11 @@ CREATE TABLE pedidos (
     id SERIAL PRIMARY KEY,
     fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     total NUMERIC(10, 2) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'COMPLETADO',
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDIENTE',
     usuario_id INTEGER NOT NULL REFERENCES usuarios(id),
     direccion_envio TEXT NOT NULL,
-    metodo_pago VARCHAR(50) NOT NULL
+    metodo_pago VARCHAR(50) NOT NULL,
+    referencia_pago VARCHAR(100)
 );
 
 -- 3. Tabla Detalles del Pedido (Renglones)
