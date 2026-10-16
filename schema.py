@@ -1,17 +1,17 @@
 """
 Schema SDL GraphQL para FACC Music (PWII - Práctica P2-6)
 Materia: Programación Web 2 · Profesor: Kegovc
-Alumna: Fátima Martín del Campo Castellanos (22300884)
 """
 
 import enum
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 import strawberry
 from strawberry.types import Info
 import re
 from database import get_db_connection, get_mongo
 from auth import hash_password, IsAuthenticated, IsAdmin
 import payments
+from events import bus
 
 
 # ENUMS Y TIPOS AUXILIARES
@@ -232,17 +232,14 @@ def marcar_pagado(conn, pedido_id: int, referencia: str):
                 {"id": d["producto_id"]},
                 [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", d["cantidad"]]}]}}}]
             )
-    return fila_a_pedido(conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone())
+            doc = productos.find_one({"id": d["producto_id"]})
+            if doc and doc["stock"] <= 5:
+                bus.publish("stock_bajo", producto_desde_doc(doc))
 
-
-def validar_monto(pedido_row, pago: dict):
-    if str(pago["reference_id"]) != str(pedido_row["id"]):
-        raise Exception("El pago no corresponde a este pedido")
-    if pago["moneda"] != payments.MONEDA or abs(pago["monto"] - float(pedido_row["total"])) > 0.01:
-        raise Exception("El monto pagado no coincide con el total del pedido")
-
-
-# OPERACIONES DE LECTURA (QUERIES)
+    pedido = fila_a_pedido(conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone())
+    if cambio:
+        bus.publish("pedido", pedido)
+    return pedido
 
 
 @strawberry.type
@@ -311,6 +308,17 @@ class Query:
 
 
 # OPERACIONES DE ESCRITURA (MUTATIONS)
+
+
+    @strawberry.field(description="(Admin) Lista de usuarios", permission_classes=[IsAdmin])
+    def usuarios(self) -> List[Usuario]:
+        conn = get_db_connection()
+        rows = conn.execute("SELECT id, nombre, email, rol FROM usuarios ORDER BY id").fetchall()
+        conn.close()
+        return [
+            Usuario(id=r["id"], nombre=r["nombre"], email=r["email"], rol=RolEnum(r["rol"]))
+            for r in rows
+        ]
 
 
 @strawberry.type
@@ -438,7 +446,9 @@ class Mutation:
             )
         conn.commit()
         conn.close()
-        return fila_a_pedido(fila)
+        pedido = fila_a_pedido(fila)
+        bus.publish("pedido", pedido)
+        return pedido
 
     # ---------------- PAYPAL ----------------
 
@@ -539,4 +549,17 @@ class Mutation:
         conn.close()
         return fila_a_pedido(r) if r else None
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+@strawberry.type
+class Subscription:
+    @strawberry.subscription(description="Pedido nuevo o con cambio de estado", permission_classes=[IsAdmin])
+    async def pedido_actualizado(self) -> AsyncGenerator[Pedido, None]:
+        async for pedido in bus.subscribe("pedido"):
+            yield pedido
+
+    @strawberry.subscription(description="Producto que quedó con 5 piezas o menos", permission_classes=[IsAdmin])
+    async def stock_bajo(self) -> AsyncGenerator[Producto, None]:
+        async for producto in bus.subscribe("stock_bajo"):
+            yield producto
+
+
+schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)
