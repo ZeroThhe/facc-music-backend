@@ -1,10 +1,7 @@
 """
 Pasarelas de pago (PayPal y Mercado Pago) — lado servidor.
-
-Las llaves SECRETAS viven solo aquí (archivo .env del backend), nunca en el front.
-El servidor es quien crea la orden con el total calculado desde la BD y quien
-VERIFICA con la pasarela que el pago realmente se completó antes de marcar
-el pedido como PAGADO.
+Las llaves SECRETAS viven solo en el .env del backend (o en Environment de Render).
+El servidor calcula el total desde la BD y VERIFICA con la pasarela el pago real.
 """
 import os
 import uuid
@@ -22,8 +19,11 @@ PAYPAL_API = "https://api-m.sandbox.paypal.com"
 
 # ---- Mercado Pago ----
 MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "")
-MP_PUBLIC_KEY = os.getenv("MP_PUBLIC_KEY", "")      # pública: el front la usa para dibujar el formulario de tarjeta
+MP_PUBLIC_KEY = os.getenv("MP_PUBLIC_KEY", "")   # solo la usa el formulario de tarjeta (Bricks)
 MP_API = "https://api.mercadopago.com"
+
+# A donde Mercado Pago regresa al usuario (Checkout Pro)
+FRONT_URL = os.getenv("FRONT_URL", "http://localhost:4321").rstrip("/")
 
 
 # ===================== PAYPAL =====================
@@ -43,7 +43,6 @@ def _paypal_token() -> str:
 
 
 def paypal_crear_orden(pedido_id: int, total: float) -> str:
-    """Crea la orden en PayPal y regresa su ID."""
     r = requests.post(
         f"{PAYPAL_API}/v2/checkout/orders",
         headers={"Authorization": f"Bearer {_paypal_token()}"},
@@ -63,13 +62,10 @@ def paypal_crear_orden(pedido_id: int, total: float) -> str:
 
 
 def paypal_capturar(order_id: str) -> dict:
-    """Captura (cobra) la orden aprobada por el comprador.
-    Regresa {status, reference_id, monto, moneda, capture_id}."""
     headers = {"Authorization": f"Bearer {_paypal_token()}", "Content-Type": "application/json"}
     r = requests.post(f"{PAYPAL_API}/v2/checkout/orders/{order_id}/capture", headers=headers, timeout=20)
     data = r.json()
 
-    # Si ya se había capturado antes, solo consultamos la orden
     if r.status_code == 422 and "ORDER_ALREADY_CAPTURED" in r.text:
         data = requests.get(f"{PAYPAL_API}/v2/checkout/orders/{order_id}", headers=headers, timeout=20).json()
     elif r.status_code not in (200, 201):
@@ -86,10 +82,7 @@ def paypal_capturar(order_id: str) -> dict:
     }
 
 
-# ===================== MERCADO PAGO (Checkout Bricks) =====================
-# El cliente llena el formulario de tarjeta DENTRO de nuestra página (Card Payment Brick).
-# Mercado Pago convierte la tarjeta en un "token" y aquí el servidor hace el cobro.
-# No hay redirección a la página de Mercado Pago.
+# ===================== MERCADO PAGO =====================
 
 def _mp_headers() -> dict:
     if not MP_ACCESS_TOKEN:
@@ -97,24 +90,19 @@ def _mp_headers() -> dict:
     return {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
 
 
+# ---- A) Tarjeta dentro de la página (Bricks + API Orders) ----
+
 def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
-    """Cobra con tarjeta usando la API de Orders de Mercado Pago.
-    El monto sale de la BD (total), nunca del front.
-    Regresa el mismo formato de antes: status 'approved' / 'rejected' / 'in_process'."""
     if not isinstance(datos, dict) or not datos.get("token") or not datos.get("payment_method_id"):
         raise Exception("Los datos de la tarjeta llegaron incompletos. Vuelve a llenar el formulario.")
 
     payer = datos.get("payer") or {}
-    # Opcional: para pruebas puedes forzar un correo con MP_PAYER_EMAIL_PRUEBA en .env
     email = os.getenv("MP_PAYER_EMAIL_PRUEBA") or payer.get("email")
     if not email:
         raise Exception("Falta el correo del comprador")
 
-    headers = {
-        **_mp_headers(),
-        "X-Idempotency-Key": str(uuid.uuid4()),   # una llave única por intento
-    }
-    monto = f"{round(total, 2):.2f}"              # Orders pide el monto como texto: "10.00"
+    headers = {**_mp_headers(), "X-Idempotency-Key": str(uuid.uuid4())}
+    monto = f"{round(total, 2):.2f}"
     body = {
         "type": "online",
         "processing_mode": "automatic",
@@ -149,7 +137,6 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
     estado_mp = pago.get("status") or d.get("status")
     detalle = pago.get("status_detail") or d.get("status_detail")
 
-    # Orders usa otros nombres de estado; los traducimos a los que ya usa tu backend
     if estado_mp == "processed":
         status = "approved"
     elif estado_mp in ("failed", "canceled", "expired"):
@@ -164,4 +151,59 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
         "reference_id": d.get("external_reference"),
         "monto": float(pago.get("paid_amount") or pago.get("amount") or d.get("total_amount") or total),
         "moneda": d.get("currency", MONEDA),
+    }
+
+
+# ---- B) Checkout Pro (redirige a la página de Mercado Pago) ----
+
+def mp_crear_preferencia(pedido_id: int, items: list) -> str:
+    body = {
+        "items": [
+            {"title": i["titulo"], "quantity": i["cantidad"],
+             "unit_price": float(i["precio"]), "currency_id": MONEDA}
+            for i in items
+        ],
+        "external_reference": str(pedido_id),
+        "back_urls": {"success": f"{FRONT_URL}/", "failure": f"{FRONT_URL}/", "pending": f"{FRONT_URL}/"},
+    }
+    if "localhost" not in FRONT_URL and "127.0.0.1" not in FRONT_URL:
+        body["auto_return"] = "approved"
+
+    r = requests.post(f"{MP_API}/checkout/preferences", headers=_mp_headers(), json=body, timeout=20)
+    if r.status_code not in (200, 201):
+        raise Exception(f"Mercado Pago no pudo crear la preferencia: {r.text[:200]}")
+    return r.json()["init_point"]
+
+
+def mp_buscar_pago_aprobado(pedido_id: int):
+    r = requests.get(
+        f"{MP_API}/v1/payments/search",
+        headers=_mp_headers(),
+        params={"external_reference": str(pedido_id), "sort": "date_created", "criteria": "desc"},
+        timeout=20,
+    )
+    if r.status_code != 200:
+        raise Exception("No se pudo consultar Mercado Pago")
+    for d in r.json().get("results", []):
+        if d.get("status") == "approved":
+            return {
+                "id": str(d["id"]),
+                "status": d["status"],
+                "reference_id": d.get("external_reference"),
+                "monto": float(d["transaction_amount"]),
+                "moneda": d.get("currency_id"),
+            }
+    return None
+
+
+def mp_consultar_pago(payment_id: str) -> dict:
+    r = requests.get(f"{MP_API}/v1/payments/{payment_id}", headers=_mp_headers(), timeout=20)
+    if r.status_code != 200:
+        raise Exception("No se encontró el pago en Mercado Pago")
+    d = r.json()
+    return {
+        "status": d["status"],
+        "reference_id": d.get("external_reference"),
+        "monto": float(d["transaction_amount"]),
+        "moneda": d.get("currency_id"),
     }

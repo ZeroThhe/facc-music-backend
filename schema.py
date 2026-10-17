@@ -1,11 +1,10 @@
 """
 Schema SDL GraphQL para FACC Music (PWII - Práctica P2-6)
 Materia: Programación Web 2 · Profesor: Kegovc
-Alumna: Fátima Martín del Campo Castellanos (22300884)
 """
 
 import enum
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 import strawberry
 from strawberry.types import Info
 import re
@@ -13,6 +12,7 @@ from database import get_db_connection, get_mongo
 from auth import hash_password, IsAuthenticated, IsAdmin
 import payments
 from strawberry.scalars import JSON
+from events import bus
 
 
 # ENUMS Y TIPOS AUXILIARES
@@ -246,7 +246,14 @@ def marcar_pagado(conn, pedido_id: int, referencia: str):
                 {"id": d["producto_id"]},
                 [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", d["cantidad"]]}]}}}]
             )
-    return fila_a_pedido(conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone())
+            doc = productos.find_one({"id": d["producto_id"]})
+            if doc and doc["stock"] <= 5:
+                bus.publish("stock_bajo", producto_desde_doc(doc))
+
+    pedido = fila_a_pedido(conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone())
+    if cambio:
+        bus.publish("pedido", pedido)
+    return pedido
 
 
 def validar_monto(pedido_row, pago: dict):
@@ -329,6 +336,17 @@ class Query:
 
 
 # OPERACIONES DE ESCRITURA (MUTATIONS)
+
+
+    @strawberry.field(description="(Admin) Lista de usuarios", permission_classes=[IsAdmin])
+    def usuarios(self) -> List[Usuario]:
+        conn = get_db_connection()
+        rows = conn.execute("SELECT id, nombre, email, rol FROM usuarios ORDER BY id").fetchall()
+        conn.close()
+        return [
+            Usuario(id=r["id"], nombre=r["nombre"], email=r["email"], rol=RolEnum(r["rol"]))
+            for r in rows
+        ]
 
 
 @strawberry.type
@@ -456,7 +474,29 @@ class Mutation:
             )
         conn.commit()
         conn.close()
-        return fila_a_pedido(fila)
+        pedido = fila_a_pedido(fila)
+        bus.publish("pedido", pedido)
+        return pedido
+
+    # ---------------- MERCADO PAGO: TARJETA DENTRO DE LA PÁGINA ----------------
+
+    @strawberry.mutation(description="Cobra con tarjeta dentro de la página (Card Payment Brick) y marca el pedido PAGADO",
+                         permission_classes=[IsAuthenticated])
+    def pagar_tarjeta_mercado_pago(self, info: Info, pedido_id: int, datos: JSON) -> Pedido:
+        conn = get_db_connection()
+        try:
+            r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "Mercado Pago")
+            if r["status"] != "PENDIENTE":
+                raise Exception("Este pedido ya no está pendiente de pago")
+            # El total sale de la BD, no de lo que mande el formulario
+            pago = payments.mp_cobrar_tarjeta(r["id"], float(r["total"]), datos)
+            if pago["status"] != "approved":
+                detalle = pago["status_detail"] or pago["status"]
+                raise Exception(f"Mercado Pago no aprobó el pago: {MENSAJES_RECHAZO_MP.get(detalle, detalle)}")
+            validar_monto(r, pago)
+            return marcar_pagado(conn, pedido_id, pago["id"])
+        finally:
+            conn.close()
 
     # ---------------- PAYPAL ----------------
 
@@ -486,21 +526,59 @@ class Mutation:
         finally:
             conn.close()
 
-    # ---------------- MERCADO PAGO ----------------
+    # ---------------- MERCADO PAGO: CHECKOUT PRO (redirección) ----------------
 
-    @strawberry.mutation(description="Cobra con tarjeta dentro de la página (Card Payment Brick) y marca el pedido PAGADO",
+    @strawberry.mutation(description="Crea la preferencia de Mercado Pago. Regresa la URL a donde se redirige al usuario.",
                          permission_classes=[IsAuthenticated])
-    def pagar_tarjeta_mercado_pago(self, info: Info, pedido_id: int, datos: JSON) -> Pedido:
+    def crear_pago_mercado_pago(self, info: Info, pedido_id: int) -> str:
         conn = get_db_connection()
         try:
             r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "Mercado Pago")
             if r["status"] != "PENDIENTE":
                 raise Exception("Este pedido ya no está pendiente de pago")
-            # El total sale de la BD, no de lo que mande el formulario
-            pago = payments.mp_cobrar_tarjeta(r["id"], float(r["total"]), datos)
+            detalles = conn.execute(
+                "SELECT producto_id, cantidad, precio_unitario FROM detalles_pedido WHERE pedido_id = %s",
+                (pedido_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+
+        col = get_mongo().productos
+        items = []
+        for d in detalles:
+            p = col.find_one({"id": d["producto_id"]}) or {}
+            items.append({
+                "titulo": f'{p.get("nombre", "Producto")} - {p.get("artista", "")}',
+                "cantidad": d["cantidad"],
+                "precio": float(d["precio_unitario"]),
+            })
+        return payments.mp_crear_preferencia(pedido_id, items)
+
+    @strawberry.mutation(description="Al regresar de Mercado Pago: consulta el pago real y marca el pedido PAGADO",
+                         permission_classes=[IsAuthenticated])
+    def confirmar_pago_mercado_pago(self, info: Info, pedido_id: int, payment_id: str) -> Pedido:
+        conn = get_db_connection()
+        try:
+            r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "Mercado Pago")
+            pago = payments.mp_consultar_pago(payment_id)
+            validar_monto(r, pago)
             if pago["status"] != "approved":
-                detalle = pago["status_detail"] or pago["status"]
-                raise Exception(f"Mercado Pago no aprobó el pago: {MENSAJES_RECHAZO_MP.get(detalle, detalle)}")
+                raise Exception(f"Mercado Pago reporta el pago como '{pago['status']}'")
+            return marcar_pagado(conn, pedido_id, str(payment_id))
+        finally:
+            conn.close()
+
+    @strawberry.mutation(description="Botón 'Ya pagué': busca en Mercado Pago un pago aprobado del pedido y lo marca PAGADO",
+                         permission_classes=[IsAuthenticated])
+    def verificar_pago_mercado_pago(self, info: Info, pedido_id: int) -> Pedido:
+        conn = get_db_connection()
+        try:
+            r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "Mercado Pago")
+            if r["status"] != "PENDIENTE":
+                return fila_a_pedido(r)  # ya estaba pagado
+            pago = payments.mp_buscar_pago_aprobado(pedido_id)
+            if not pago:
+                raise Exception("Todavía no vemos un pago aprobado en Mercado Pago. Termina de pagar y vuelve a intentar.")
             validar_monto(r, pago)
             return marcar_pagado(conn, pedido_id, pago["id"])
         finally:
@@ -519,4 +597,17 @@ class Mutation:
         conn.close()
         return fila_a_pedido(r) if r else None
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+@strawberry.type
+class Subscription:
+    @strawberry.subscription(description="Pedido nuevo o con cambio de estado", permission_classes=[IsAdmin])
+    async def pedido_actualizado(self) -> AsyncGenerator[Pedido, None]:
+        async for pedido in bus.subscribe("pedido"):
+            yield pedido
+
+    @strawberry.subscription(description="Producto que quedó con 5 piezas o menos", permission_classes=[IsAdmin])
+    async def stock_bajo(self) -> AsyncGenerator[Producto, None]:
+        async for producto in bus.subscribe("stock_bajo"):
+            yield producto
+
+
+schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)

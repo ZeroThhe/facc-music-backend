@@ -3,7 +3,7 @@ import os
 import datetime
 import bcrypt
 import jwt
-from fastapi import Request
+from fastapi import Request, WebSocket
 from fastapi.security import OAuth2PasswordBearer
 from strawberry.permission import BasePermission
 from database import get_db_connection
@@ -38,13 +38,14 @@ def crear_token(usuario_id: int, rol: str) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def get_user_from_request(request: Request):
-    """Lee 'Authorization: Bearer <token>' y devuelve el usuario (dict) o None."""
+def get_user_from_request(request):
+    """Lee el token de 'Authorization: Bearer <token>' (HTTP) o de '?token=' (WebSocket)."""
     header = request.headers.get("Authorization", "")
-    if not header.startswith("Bearer "):
+    token = header[7:] if header.startswith("Bearer ") else request.query_params.get("token")
+    if not token:
         return None
     try:
-        payload = jwt.decode(header[7:], SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload["sub"])
     except (jwt.PyJWTError, KeyError, ValueError):
         return None
@@ -55,9 +56,9 @@ def get_user_from_request(request: Request):
     return dict(r) if r else None
 
 
-async def get_context(request: Request):
-    """Contexto de GraphQL: cada resolver puede leer info.context['user']."""
-    return {"request": request, "user": get_user_from_request(request)}
+async def get_context(request: Request = None, ws: WebSocket = None):
+    conn = request if request is not None else ws
+    return {"request": conn, "user": get_user_from_request(conn)}
 
 
 def migrar_passwords():
