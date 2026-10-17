@@ -8,8 +8,11 @@ import enum
 from typing import List, Optional
 import strawberry
 from strawberry.types import Info
-from database import get_db_connection
+import re
+from database import get_db_connection, get_mongo
 from auth import hash_password, IsAuthenticated, IsAdmin
+import payments
+from strawberry.scalars import JSON
 
 
 # ENUMS Y TIPOS AUXILIARES
@@ -19,6 +22,30 @@ from auth import hash_password, IsAuthenticated, IsAdmin
 class RolEnum(enum.Enum):
     CLIENTE = "CLIENTE"
     ADMIN = "ADMIN"
+
+
+# HELPERS: convertir documentos de MongoDB en tipos GraphQL
+
+def producto_desde_doc(d) -> "Producto":
+    return Producto(
+        id=d["id"],
+        nombre=d["nombre"],
+        artista=d["artista"],
+        formato=d["formato"],
+        precio=float(d["precio"]),
+        imagen=d["imagen"],
+        stock=d["stock"],
+        destacado=bool(d["destacado"]),
+        categoria_id=d["categoria_id"]
+    )
+
+def categoria_desde_doc(d) -> "Categoria":
+    return Categoria(
+        id=d["id"],
+        nombre=d["nombre"],
+        descripcion=d.get("descripcion"),
+        imagen=d.get("imagen")
+    )
 
 
 # TIPOS GRAPHQL (ENTIDADES CON RESOLUTORES ANIDADOS)
@@ -33,25 +60,8 @@ class Categoria:
 
     @strawberry.field(description="Resolutor anidado: Obtener los productos de esta categoría")
     def productos(self) -> List["Producto"]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM productos WHERE categoria_id = ?", (self.id,))
-        rows = cursor.fetchall()
-        conn.close()
-        return [
-            Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-            for r in rows
-        ]
+        docs = get_mongo().productos.find({"categoria_id": self.id}).sort("id", 1)
+        return [producto_desde_doc(d) for d in docs]
 
 @strawberry.type(description="Entidad Producto (Álbum / Vinilo / CD)")
 class Producto:
@@ -67,19 +77,8 @@ class Producto:
 
     @strawberry.field(description="Resolutor anidado: Obtener la Categoría del producto")
     def categoria(self) -> Optional[Categoria]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categorias WHERE id = ?", (self.categoria_id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Categoria(
-                id=r["id"],
-                nombre=r["nombre"],
-                descripcion=r["descripcion"],
-                imagen=r["imagen"]
-            )
-        return None
+        d = get_mongo().categorias.find_one({"id": self.categoria_id})
+        return categoria_desde_doc(d) if d else None
 
 @strawberry.type(description="Resultado de consulta paginada de productos")
 class ProductoPaginado:
@@ -103,24 +102,8 @@ class DetallePedido:
 
     @strawberry.field(description="Resolutor anidado: Producto comprado en este renglón")
     def producto(self) -> Optional[Producto]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM productos WHERE id = ?", (self.producto_id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-        return None
+        d = get_mongo().productos.find_one({"id": self.producto_id})
+        return producto_desde_doc(d) if d else None
 
 @strawberry.type(description="Entidad Pedido (Orden de Compra)")
 class Pedido:
@@ -131,12 +114,13 @@ class Pedido:
     usuario_id: int
     direccion_envio: str
     metodo_pago: str
+    referencia_pago: Optional[str] = None
 
     @strawberry.field(description="Resolutor anidado: Usuario que realizó el pedido")
     def usuario(self) -> Optional[Usuario]:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM usuarios WHERE id = ?", (self.usuario_id,))
+        cursor.execute("SELECT * FROM usuarios WHERE id = %s", (self.usuario_id,))
         r = cursor.fetchone()
         conn.close()
         if r:
@@ -152,7 +136,7 @@ class Pedido:
     def detalles(self) -> List[DetallePedido]:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM detalles_pedido WHERE pedido_id = ?", (self.id,))
+        cursor.execute("SELECT * FROM detalles_pedido WHERE pedido_id = %s ORDER BY id", (self.id,))
         rows = cursor.fetchall()
         conn.close()
         return [
@@ -181,11 +165,10 @@ class ProductoInput:
     destacado: bool
     categoria_id: int
 
-@strawberry.input(description="Renglón del carrito para registrar en un pedido")
+@strawberry.input(description="Renglón del carrito (el precio lo toma el servidor de MongoDB, no el cliente)")
 class DetalleInput:
     producto_id: int
     cantidad: int
-    precio_unitario: float
 
 @strawberry.input(description="Datos para registrar un nuevo pedido (el usuario sale del token, no del input)")
 class PedidoInput:
@@ -200,6 +183,79 @@ class RegistroInput:
     password: str
 
 
+@strawberry.type(description="Datos PÚBLICOS que necesita el front para pintar los botones de pago")
+class ConfigPagos:
+    paypal_client_id: str
+    mp_public_key: str
+    moneda: str
+
+
+METODOS_PAGO = ["PayPal", "Mercado Pago"]
+
+# Mensajes claros para los rechazos más comunes de Mercado Pago (status_detail)
+MENSAJES_RECHAZO_MP = {
+    "cc_rejected_bad_filled_security_code": "El código de seguridad es incorrecto.",
+    "cc_rejected_bad_filled_date": "La fecha de vencimiento es incorrecta.",
+    "cc_rejected_bad_filled_other": "Revisa los datos de la tarjeta.",
+    "cc_rejected_insufficient_amount": "La tarjeta no tiene fondos suficientes.",
+    "cc_rejected_call_for_authorize": "Debes autorizar el pago con tu banco.",
+    "cc_rejected_other_reason": "La tarjeta rechazó el pago.",
+    "pending_contingency": "El pago quedó en revisión; aún no se acredita.",
+    "pending_review_manual": "El pago quedó en revisión; aún no se acredita.",
+}
+STATUS_PEDIDO = ["PENDIENTE", "PAGADO", "ENVIADO", "ENTREGADO", "CANCELADO", "COMPLETADO"]
+
+
+def fila_a_pedido(r) -> Pedido:
+    return Pedido(
+        id=r["id"],
+        fecha=str(r["fecha"]),
+        total=float(r["total"]),
+        status=r["status"],
+        usuario_id=r["usuario_id"],
+        direccion_envio=r["direccion_envio"],
+        metodo_pago=r["metodo_pago"],
+        referencia_pago=r.get("referencia_pago"),
+    )
+
+
+def pedido_pendiente_del_usuario(conn, pedido_id: int, user: dict, metodo: str):
+    """Valida que el pedido exista, sea del usuario y se pague con ese método."""
+    r = conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone()
+    if not r or r["usuario_id"] != user["id"]:
+        raise Exception("Pedido no encontrado")
+    if r["metodo_pago"] != metodo:
+        raise Exception(f"Este pedido no se paga con {metodo}")
+    return r
+
+
+def marcar_pagado(conn, pedido_id: int, referencia: str):
+    """PENDIENTE -> PAGADO y descuenta stock en MongoDB.
+    El WHERE status='PENDIENTE' garantiza que el stock se descuente una sola vez."""
+    cambio = conn.execute(
+        "UPDATE pedidos SET status = 'PAGADO', referencia_pago = %s WHERE id = %s AND status = 'PENDIENTE' RETURNING id",
+        (referencia, pedido_id)
+    ).fetchone()
+    conn.commit()
+
+    if cambio:
+        productos = get_mongo().productos
+        for d in conn.execute("SELECT producto_id, cantidad FROM detalles_pedido WHERE pedido_id = %s",
+                              (pedido_id,)).fetchall():
+            productos.update_one(
+                {"id": d["producto_id"]},
+                [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", d["cantidad"]]}]}}}]
+            )
+    return fila_a_pedido(conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone())
+
+
+def validar_monto(pedido_row, pago: dict):
+    if str(pago["reference_id"]) != str(pedido_row["id"]):
+        raise Exception("El pago no corresponde a este pedido")
+    if pago["moneda"] != payments.MONEDA or abs(pago["monto"] - float(pedido_row["total"])) > 0.01:
+        raise Exception("El monto pagado no coincide con el total del pedido")
+
+
 # OPERACIONES DE LECTURA (QUERIES)
 
 
@@ -207,36 +263,13 @@ class RegistroInput:
 class Query:
     @strawberry.field(description="Listar todas las categorías con sus productos anidados")
     def categorias(self) -> List[Categoria]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categorias")
-        rows = cursor.fetchall()
-        conn.close()
-        return [
-            Categoria(
-                id=r["id"],
-                nombre=r["nombre"],
-                descripcion=r["descripcion"],
-                imagen=r["imagen"]
-            )
-            for r in rows
-        ]
+        docs = get_mongo().categorias.find().sort("id", 1)
+        return [categoria_desde_doc(d) for d in docs]
 
     @strawberry.field(description="Consultar una categoría por su ID")
     def categoria(self, id: int) -> Optional[Categoria]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categorias WHERE id = ?", (id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Categoria(
-                id=r["id"],
-                nombre=r["nombre"],
-                descripcion=r["descripcion"],
-                imagen=r["imagen"]
-            )
-        return None
+        d = get_mongo().categorias.find_one({"id": id})
+        return categoria_desde_doc(d) if d else None
 
     @strawberry.field(description="Listar el catálogo de productos con paginación y filtros por categoría o búsqueda")
     def productos(
@@ -246,70 +279,22 @@ class Query:
         categoriaId: Optional[int] = None,
         busqueda: Optional[str] = None
     ) -> ProductoPaginado:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        query_sql = "SELECT * FROM productos WHERE 1=1"
-        count_sql = "SELECT COUNT(*) as total FROM productos WHERE 1=1"
-        params = []
-
+        filtro = {}
         if categoriaId:
-            query_sql += " AND categoria_id = ?"
-            count_sql += " AND categoria_id = ?"
-            params.append(categoriaId)
-
+            filtro["categoria_id"] = categoriaId
         if busqueda:
-            query_sql += " AND (nombre LIKE ? OR artista LIKE ?)"
-            count_sql += " AND (nombre LIKE ? OR artista LIKE ?)"
-            search_param = f"%{busqueda}%"
-            params.extend([search_param, search_param])
+            patron = {"$regex": re.escape(busqueda), "$options": "i"}
+            filtro["$or"] = [{"nombre": patron}, {"artista": patron}]
 
-        cursor.execute(count_sql, params)
-        total = cursor.fetchone()["total"]
-
-        query_sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-
-        cursor.execute(query_sql, params)
-        rows = cursor.fetchall()
-        conn.close()
-
-        lista_prods = [
-            Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-            for r in rows
-        ]
-        return ProductoPaginado(total=total, productos=lista_prods)
+        col = get_mongo().productos
+        total = col.count_documents(filtro)
+        docs = col.find(filtro).sort("id", -1).skip(offset or 0).limit(limit or 20)
+        return ProductoPaginado(total=total, productos=[producto_desde_doc(d) for d in docs])
 
     @strawberry.field(description="Consultar un producto específico por ID")
     def producto(self, id: int) -> Optional[Producto]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM productos WHERE id = ?", (id,))
-        r = cursor.fetchone()
-        conn.close()
-        if r:
-            return Producto(
-                id=r["id"],
-                nombre=r["nombre"],
-                artista=r["artista"],
-                formato=r["formato"],
-                precio=float(r["precio"]),
-                imagen=r["imagen"],
-                stock=r["stock"],
-                destacado=bool(r["destacado"]),
-                categoria_id=r["categoria_id"]
-            )
-        return None
+        d = get_mongo().productos.find_one({"id": id})
+        return producto_desde_doc(d) if d else None
 
     @strawberry.field(description="Usuario de la sesión actual (null si no hay token o es inválido)")
     def me(self, info: Info) -> Optional[Usuario]:
@@ -329,21 +314,18 @@ class Query:
         if user["rol"] == "ADMIN":
             cursor.execute("SELECT * FROM pedidos ORDER BY fecha DESC")
         else:
-            cursor.execute("SELECT * FROM pedidos WHERE usuario_id = ? ORDER BY fecha DESC", (user["id"],))
+            cursor.execute("SELECT * FROM pedidos WHERE usuario_id = %s ORDER BY fecha DESC", (user["id"],))
         rows = cursor.fetchall()
         conn.close()
-        return [
-            Pedido(
-                id=r["id"],
-                fecha=r["fecha"],
-                total=float(r["total"]),
-                status=r["status"],
-                usuario_id=r["usuario_id"],
-                direccion_envio=r["direccion_envio"],
-                metodo_pago=r["metodo_pago"]
-            )
-            for r in rows
-        ]
+        return [fila_a_pedido(r) for r in rows]
+
+    @strawberry.field(description="Configuración pública de pagos (Client ID de PayPal, Public Key de Mercado Pago y moneda)")
+    def config_pagos(self) -> ConfigPagos:
+        return ConfigPagos(
+            paypal_client_id=payments.PAYPAL_CLIENT_ID,
+            mp_public_key=payments.MP_PUBLIC_KEY,
+            moneda=payments.MONEDA,
+        )
 
 
 # OPERACIONES DE ESCRITURA (MUTATIONS)
@@ -362,32 +344,35 @@ class Mutation:
         conn = get_db_connection()
         try:
             cur = conn.execute(
-                "INSERT INTO usuarios (nombre, email, password, rol) VALUES (?, ?, ?, 'CLIENTE')",
+                "INSERT INTO usuarios (nombre, email, password, rol) VALUES (%s, %s, %s, 'CLIENTE') RETURNING id",
                 (datos.nombre.strip(), email, hash_password(datos.password))
             )
+            uid = cur.fetchone()["id"]
             conn.commit()
         except Exception:
+            conn.rollback()
             conn.close()
             raise Exception("Ese correo ya está registrado")
 
-        uid = cur.lastrowid
         conn.close()
         return Usuario(id=uid, nombre=datos.nombre.strip(), email=email, rol=RolEnum.CLIENTE)
 
     @strawberry.mutation(description="Registrar un nuevo producto en el catálogo", permission_classes=[IsAdmin])
     def registrar_producto(self, input: ProductoInput) -> Producto:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO productos (nombre, artista, formato, precio, imagen, stock, destacado, categoria_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (input.nombre, input.artista, input.formato, input.precio, input.imagen, input.stock, int(input.destacado), input.categoria_id)
-        )
-        new_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+        col = get_mongo().productos
+        ultimo = col.find_one(sort=[("id", -1)])
+        new_id = (ultimo["id"] + 1) if ultimo else 1
+        col.insert_one({
+            "id": new_id,
+            "nombre": input.nombre,
+            "artista": input.artista,
+            "formato": input.formato,
+            "precio": input.precio,
+            "imagen": input.imagen,
+            "stock": input.stock,
+            "destacado": input.destacado,
+            "categoria_id": input.categoria_id,
+        })
         return Producto(
             id=new_id,
             nombre=input.nombre,
@@ -402,18 +387,18 @@ class Mutation:
 
     @strawberry.mutation(description="Actualizar los datos de un producto existente", permission_classes=[IsAdmin])
     def actualizar_producto(self, id: int, input: ProductoInput) -> Optional[Producto]:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE productos
-            SET nombre=?, artista=?, formato=?, precio=?, imagen=?, stock=?, destacado=?, categoria_id=?
-            WHERE id=?
-            """,
-            (input.nombre, input.artista, input.formato, input.precio, input.imagen, input.stock, int(input.destacado), input.categoria_id, id)
-        )
-        conn.commit()
-        conn.close()
+        res = get_mongo().productos.update_one({"id": id}, {"$set": {
+            "nombre": input.nombre,
+            "artista": input.artista,
+            "formato": input.formato,
+            "precio": input.precio,
+            "imagen": input.imagen,
+            "stock": input.stock,
+            "destacado": input.destacado,
+            "categoria_id": input.categoria_id,
+        }})
+        if res.matched_count == 0:
+            return None
         return Producto(
             id=id,
             nombre=input.nombre,
@@ -428,61 +413,110 @@ class Mutation:
 
     @strawberry.mutation(description="Eliminar un producto del catálogo por su ID", permission_classes=[IsAdmin])
     def eliminar_producto(self, id: int) -> bool:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM productos WHERE id = ?", (id,))
-        rows_deleted = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return rows_deleted > 0
+        res = get_mongo().productos.delete_one({"id": id})
+        return res.deleted_count > 0
 
     @strawberry.mutation(
-        description="Registrar un pedido completo con sus renglones del carrito",
+        description="Crear el pedido en estado PENDIENTE (aún sin pagar). Precios y total los calcula el servidor.",
         permission_classes=[IsAuthenticated]
     )
     def registrar_pedido(self, info: Info, datos: PedidoInput) -> Pedido:
         usuario_id = info.context["user"]["id"]
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        if datos.metodo_pago not in METODOS_PAGO:
+            raise Exception("Método de pago no válido (usa PayPal o Mercado Pago)")
+        if not datos.detalles:
+            raise Exception("El carrito está vacío")
+        if not datos.direccion_envio.strip():
+            raise Exception("Falta la dirección de envío")
 
-        total = sum(d.cantidad * d.precio_unitario for d in datos.detalles)
-
-        cursor.execute(
-            """
-            INSERT INTO pedidos (total, status, usuario_id, direccion_envio, metodo_pago)
-            VALUES (?, 'COMPLETADO', ?, ?, ?)
-            """,
-            (total, usuario_id, datos.direccion_envio, datos.metodo_pago)
-        )
-        pedido_id = cursor.lastrowid
-
+        # 1) Precios y stock reales desde MongoDB
+        renglones = []
+        col = get_mongo().productos
         for d in datos.detalles:
-            cursor.execute(
-                """
-                INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario)
-                VALUES (?, ?, ?, ?)
-                """,
-                (pedido_id, d.producto_id, d.cantidad, d.precio_unitario)
-            )
-            cursor.execute(
-                "UPDATE productos SET stock = MAX(0, stock - ?) WHERE id = ?",
-                (d.cantidad, d.producto_id)
-            )
+            p = col.find_one({"id": d.producto_id})
+            if not p:
+                raise Exception(f"El producto {d.producto_id} ya no existe")
+            if d.cantidad <= 0 or d.cantidad > p["stock"]:
+                raise Exception(f"No hay suficiente stock de '{p['nombre']}' (quedan {p['stock']})")
+            renglones.append((d.producto_id, d.cantidad, float(p["precio"])))
 
+        total = round(sum(c * precio for _, c, precio in renglones), 2)
+
+        # 2) Pedido PENDIENTE y renglones en PostgreSQL (el stock se descuenta hasta que se paga)
+        conn = get_db_connection()
+        fila = conn.execute(
+            "INSERT INTO pedidos (total, status, usuario_id, direccion_envio, metodo_pago) "
+            "VALUES (%s, 'PENDIENTE', %s, %s, %s) RETURNING *",
+            (total, usuario_id, datos.direccion_envio.strip(), datos.metodo_pago)
+        ).fetchone()
+        for producto_id, cantidad, precio in renglones:
+            conn.execute(
+                "INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario) VALUES (%s, %s, %s, %s)",
+                (fila["id"], producto_id, cantidad, precio)
+            )
         conn.commit()
-
-        cursor.execute("SELECT fecha FROM pedidos WHERE id = ?", (pedido_id,))
-        fecha = cursor.fetchone()["fecha"]
         conn.close()
+        return fila_a_pedido(fila)
 
-        return Pedido(
-            id=pedido_id,
-            fecha=fecha,
-            total=total,
-            status="COMPLETADO",
-            usuario_id=usuario_id,
-            direccion_envio=datos.direccion_envio,
-            metodo_pago=datos.metodo_pago
-        )
+    # ---------------- PAYPAL ----------------
+
+    @strawberry.mutation(description="Crea la orden en PayPal para un pedido pendiente. Regresa el orderID.",
+                         permission_classes=[IsAuthenticated])
+    def crear_orden_paypal(self, info: Info, pedido_id: int) -> str:
+        conn = get_db_connection()
+        try:
+            r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "PayPal")
+            if r["status"] != "PENDIENTE":
+                raise Exception("Este pedido ya no está pendiente de pago")
+            return payments.paypal_crear_orden(r["id"], float(r["total"]))
+        finally:
+            conn.close()
+
+    @strawberry.mutation(description="Cobra la orden aprobada en PayPal, verifica el monto y marca el pedido PAGADO",
+                         permission_classes=[IsAuthenticated])
+    def capturar_pago_paypal(self, info: Info, pedido_id: int, order_id: str) -> Pedido:
+        conn = get_db_connection()
+        try:
+            r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "PayPal")
+            pago = payments.paypal_capturar(order_id)
+            validar_monto(r, pago)
+            if pago["status"] != "COMPLETED":
+                raise Exception(f"PayPal reporta el pago como {pago['status']}")
+            return marcar_pagado(conn, pedido_id, pago["capture_id"])
+        finally:
+            conn.close()
+
+    # ---------------- MERCADO PAGO ----------------
+
+    @strawberry.mutation(description="Cobra con tarjeta dentro de la página (Card Payment Brick) y marca el pedido PAGADO",
+                         permission_classes=[IsAuthenticated])
+    def pagar_tarjeta_mercado_pago(self, info: Info, pedido_id: int, datos: JSON) -> Pedido:
+        conn = get_db_connection()
+        try:
+            r = pedido_pendiente_del_usuario(conn, pedido_id, info.context["user"], "Mercado Pago")
+            if r["status"] != "PENDIENTE":
+                raise Exception("Este pedido ya no está pendiente de pago")
+            # El total sale de la BD, no de lo que mande el formulario
+            pago = payments.mp_cobrar_tarjeta(r["id"], float(r["total"]), datos)
+            if pago["status"] != "approved":
+                detalle = pago["status_detail"] or pago["status"]
+                raise Exception(f"Mercado Pago no aprobó el pago: {MENSAJES_RECHAZO_MP.get(detalle, detalle)}")
+            validar_monto(r, pago)
+            return marcar_pagado(conn, pedido_id, pago["id"])
+        finally:
+            conn.close()
+
+    # ---------------- ADMIN ----------------
+
+    @strawberry.mutation(description="(Admin) Cambiar el estado de un pedido: ENVIADO, ENTREGADO, CANCELADO...",
+                         permission_classes=[IsAdmin])
+    def cambiar_status_pedido(self, id: int, status: str) -> Optional[Pedido]:
+        if status not in STATUS_PEDIDO:
+            raise Exception("Estado no válido")
+        conn = get_db_connection()
+        r = conn.execute("UPDATE pedidos SET status = %s WHERE id = %s RETURNING *", (status, id)).fetchone()
+        conn.commit()
+        conn.close()
+        return fila_a_pedido(r) if r else None
 
 schema = strawberry.Schema(query=Query, mutation=Mutation)

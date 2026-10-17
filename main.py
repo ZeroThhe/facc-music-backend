@@ -2,6 +2,10 @@
 Servidor Principal FastAPI con Strawberry GraphQL para FACC Music.
 """
 
+import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))  # credenciales y URLs de BD (antes de importar lo demás)
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -10,7 +14,7 @@ from database import init_db, get_db_connection
 from schema import schema
 from auth import get_context, migrar_passwords, verify_password, crear_token
 
-# 1. Inicializar base de datos
+# 1. Inicializar bases de datos (PostgreSQL + MongoDB)
 init_db()
 migrar_passwords()  # Hashea con bcrypt cualquier contraseña en texto plano (idempotente)
 
@@ -47,7 +51,7 @@ app.include_router(graphql_app, prefix="/graphql")
 @app.post("/token", tags=["Auth"])
 def login_oauth2(form_data: OAuth2PasswordRequestForm = Depends()):
     conn = get_db_connection()
-    r = conn.execute("SELECT * FROM usuarios WHERE email = ?", (form_data.username,)).fetchone()
+    r = conn.execute("SELECT * FROM usuarios WHERE email = %s", (form_data.username,)).fetchone()
     conn.close()
 
     if not r or not verify_password(form_data.password, r["password"]):
