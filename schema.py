@@ -492,7 +492,7 @@ class Mutation:
             pago = payments.mp_cobrar_tarjeta(r["id"], float(r["total"]), datos)
             if pago["status"] != "approved":
                 detalle = pago["status_detail"] or pago["status"]
-                raise Exception(f"Mercado Pago no aprobó el pago: {MENSAJES_RECHAZO_MP.get(detalle, detalle)}")
+                raise Exception(payments.mensaje_rechazo(detalle))
             validar_monto(r, pago)
             return marcar_pagado(conn, pedido_id, pago["id"])
         finally:

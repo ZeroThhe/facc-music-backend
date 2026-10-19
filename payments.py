@@ -92,6 +92,69 @@ def _mp_headers() -> dict:
 
 # ---- A) Tarjeta dentro de la página (Bricks + API Orders) ----
 
+# Mensajes de rechazo (equivalen a los titulares de prueba de Mercado Pago)
+MENSAJES_RECHAZO_MP = {
+    "cc_rejected_other_reason": "Rechazado por error general.",
+    "pending_contingency": "Pago pendiente: aún se está procesando y no se acredita.",
+    "pending_review_manual": "Pago pendiente: está en revisión y aún no se acredita.",
+    "cc_rejected_call_for_authorize": "Rechazado: debes autorizar el pago con tu banco.",
+    "cc_rejected_insufficient_amount": "Rechazado por importe insuficiente.",
+    "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
+    "cc_rejected_bad_filled_date": "Rechazado por un problema con la fecha de vencimiento.",
+    "cc_rejected_bad_filled_other": "Rechazado: revisa los datos de la tarjeta.",
+    "cc_rejected_bad_filled_card_number": "Rechazado: número de tarjeta inválido.",
+    "cc_rejected_form_error": "Rechazado por un error en el formulario.",
+    "cc_rejected_card_error": "Rechazado: falta o es inválido el número de tarjeta.",
+    "cc_rejected_invalid_installments": "Rechazado por cuotas inválidas.",
+    "cc_rejected_duplicated_payment": "Rechazado por pago duplicado.",
+    "cc_rejected_card_disabled": "Rechazado: la tarjeta está deshabilitada.",
+    "cc_rejected_card_type_not_allowed": "Rechazado: tipo de tarjeta no permitido.",
+    "cc_rejected_max_attempts": "Rechazado por exceder los intentos del PIN de la tarjeta.",
+    "cc_rejected_blacklist": "Rechazado: la tarjeta está en lista negra.",
+    "cc_rejected_high_risk": "Rechazado por riesgo de fraude.",
+}
+
+# Respaldo: por si la API de Orders usa otros nombres, buscamos palabras clave
+_FRAGMENTOS_RECHAZO = [
+    ("insufficient", "Rechazado por importe insuficiente."),
+    ("security_code", "Rechazado por código de seguridad inválido."),
+    ("expir", "Rechazado por un problema con la fecha de vencimiento."),
+    ("date", "Rechazado por un problema con la fecha de vencimiento."),
+    ("call_for_authorize", "Rechazado: debes autorizar el pago con tu banco."),
+    ("installment", "Rechazado por cuotas inválidas."),
+    ("duplicate", "Rechazado por pago duplicado."),
+    ("disabled", "Rechazado: la tarjeta está deshabilitada."),
+    ("type_not_allowed", "Rechazado: tipo de tarjeta no permitido."),
+    ("max_attempts", "Rechazado por exceder los intentos del PIN de la tarjeta."),
+    ("blacklist", "Rechazado: la tarjeta está en lista negra."),
+    ("card_number", "Rechazado: número de tarjeta inválido."),
+    ("form", "Rechazado por un error en el formulario."),
+    ("pending", "Pago pendiente: aún no se acredita."),
+    ("high_risk", "Rechazado por riesgo de fraude."),
+]
+
+
+def mensaje_rechazo(codigo) -> str:
+    c = str(codigo or "").strip().lower()
+    if c in MENSAJES_RECHAZO_MP:
+        return MENSAJES_RECHAZO_MP[c]
+    for fragmento, texto in _FRAGMENTOS_RECHAZO:
+        if fragmento in c:
+            return texto
+    return f"Mercado Pago rechazó el pago ({c or 'sin detalle'})."
+
+
+def _codigo_error(d: dict):
+    """Saca el código de rechazo de la respuesta de Orders, venga donde venga."""
+    pago = ((d.get("transactions") or {}).get("payments") or [{}])[0]
+    detalle = pago.get("status_detail") or d.get("status_detail")
+    if detalle and detalle != "accredited":
+        return detalle
+    errores = d.get("errors") or []
+    if errores:
+        return errores[0].get("code") or errores[0].get("message")
+    return d.get("message")
+
 def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
     if not isinstance(datos, dict) or not datos.get("token") or not datos.get("payment_method_id"):
         raise Exception("Los datos de la tarjeta llegaron incompletos. Vuelve a llenar el formulario.")
@@ -128,10 +191,11 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
     except ValueError:
         d = {}
 
+     # Va a los Logs de Render para ver el código real que devolvió Mercado Pago
+    print("MP orders:", r.status_code, "| errores:", d.get("errors"), "| detalle:", _codigo_error(d), flush=True)
+
     if r.status_code not in (200, 201):
-        errores = d.get("errors") or []
-        msg = errores[0].get("message") if errores else (d.get("message") or r.text[:200])
-        raise Exception(f"Mercado Pago no pudo procesar la tarjeta: {msg}")
+        raise Exception(mensaje_rechazo(_codigo_error(d)))
 
     pago = ((d.get("transactions") or {}).get("payments") or [{}])[0]
     estado_mp = pago.get("status") or d.get("status")
