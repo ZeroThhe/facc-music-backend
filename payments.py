@@ -4,7 +4,6 @@ Las llaves SECRETAS viven solo en el .env del backend (o en Environment de Rende
 El servidor calcula el total desde la BD y VERIFICA con la pasarela el pago real.
 """
 import os
-import time
 import uuid
 import requests
 from dotenv import load_dotenv
@@ -91,161 +90,81 @@ def _mp_headers() -> dict:
     return {"Authorization": f"Bearer {MP_ACCESS_TOKEN}"}
 
 
-# ---- Mensajes de rechazo ----
-# Códigos (status_detail) que devuelve la API de Orders, según la documentación
-# de Mercado Pago, traducidos a los textos de la tabla de titulares de prueba.
-# Nota: SECU, EXPI, FORM y CARD pueden llegar todos como "bad_filled_card_data".
-MENSAJES_RECHAZO_MP = {
-    # OTHE
-    "cc_rejected_other_reason": "Rechazado por error general.",
-    "rejected_by_issuer": "Rechazado por error general (el banco emisor rechazó el pago).",
-    "processing_error": "Rechazado por error general (error de procesamiento).",
-    # CONT (pendiente)
-    "in_process": "Pendiente de pago: el pago aún se está procesando.",
-    "pending_review_manual": "Pendiente de pago: el pago está en revisión manual.",
-    "pending_contingency": "Pendiente de pago: el pago aún no se acredita.",
-    "in_review": "Pendiente de pago: el pago está en revisión.",
-    "pending_challenge": "Pendiente de pago: falta completar la autenticación 3DS.",
-    "waiting_payment": "Pendiente de pago: se espera el pago.",
-    # CALL
-    "required_call_for_authorize": "Rechazado con validación para autorizar: llama a tu banco.",
-    "cc_rejected_call_for_authorize": "Rechazado con validación para autorizar: llama a tu banco.",
-    # FUND
-    "insufficient_amount": "Rechazado por importe insuficiente.",
-    "card_insufficient_amount": "Rechazado por importe insuficiente.",
-    "cc_rejected_insufficient_amount": "Rechazado por importe insuficiente.",
-    # SECU / EXPI / FORM / CARD
-    "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento, número de tarjeta o error de formulario).",
-    "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
-    "cc_rejected_bad_filled_date": "Rechazado por un problema con la fecha de vencimiento.",
-    "cc_rejected_bad_filled_other": "Rechazado por un error en el formulario.",
-    "cc_rejected_bad_filled_card_number": "Rechazado: falta o es inválido el número de tarjeta.",
-    "invalid_card_token": "Rechazado: el token de la tarjeta no es válido. Vuelve a llenar el formulario.",
-    # INST
-    "invalid_installments": "Rechazado por cuotas inválidas.",
-    "cc_rejected_invalid_installments": "Rechazado por cuotas inválidas.",
-    # DUPL
-    "cc_rejected_duplicated_payment": "Rechazado por pago duplicado.",
-    # LOCK
-    "card_disabled": "Rechazado por tarjeta deshabilitada.",
-    "cc_rejected_card_disabled": "Rechazado por tarjeta deshabilitada.",
-    # CTNA
-    "cc_rejected_card_type_not_allowed": "Rechazado por tipo de tarjeta no permitido.",
-    # ATTE
-    "max_attempts_exceeded": "Rechazado debido a intentos excedidos del PIN de la tarjeta.",
-    "cc_rejected_max_attempts": "Rechazado debido a intentos excedidos del PIN de la tarjeta.",
-    # BLAC / riesgo
-    "high_risk": "Rechazado por riesgo alto (por ejemplo, tarjeta en lista negra).",
-    "cc_rejected_high_risk": "Rechazado por riesgo alto (por ejemplo, tarjeta en lista negra).",
-    "cc_rejected_blacklist": "Rechazado por estar en lista negra.",
-    # Otros
-    "amount_limit_exceeded": "Rechazado por exceder el límite de importe.",
-    "3ds_challenge_expired": "Rechazado: expiró la autenticación 3DS.",
-}
-
-
-def mensaje_rechazo(codigo) -> str:
-    c = str(codigo or "").strip().lower()
-    if c in MENSAJES_RECHAZO_MP:
-        return MENSAJES_RECHAZO_MP[c]
-    if c in ("rejected", "failed", ""):
-        return "Mercado Pago rechazó el pago, pero no indicó el motivo."
-    return f"Mercado Pago rechazó el pago (código: {c})."
-
-
-def _extraer_pago(d: dict):
-    """Devuelve (pago, estado, detalle) de la respuesta de una orden."""
-    pago = ((d.get("transactions") or {}).get("payments") or [{}])[0]
-    estado = pago.get("status") or d.get("status")
-    detalle = pago.get("status_detail") or d.get("status_detail")
-    return pago, estado, detalle
-
-
-def _codigo_error_http(d: dict):
-    errores = d.get("errors") or []
-    if errores:
-        return errores[0].get("code") or errores[0].get("message")
-    return d.get("message")
-
-
 # ---- A) Tarjeta dentro de la página (Bricks + API Orders) ----
 
 def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
+    """Cobra el token generado por CardPayment Brick usando POST /v1/payments.
+
+    Este endpoint es el compatible con el formulario CardPayment de @mercadopago/sdk-react.
+    El importe y la referencia siempre se toman del pedido del servidor.
+    """
     if not isinstance(datos, dict) or not datos.get("token") or not datos.get("payment_method_id"):
-        raise Exception("Los datos de la tarjeta llegaron incompletos. Vuelve a llenar el formulario.")
+        raise Exception(
+            "Mercado Pago no recibió el token o el método de pago. "
+            "Verifica los datos de la tarjeta e inténtalo de nuevo."
+        )
 
-    payer = datos.get("payer") or {}
-    email = os.getenv("MP_PAYER_EMAIL_PRUEBA") or payer.get("email")
+    payer_recibido = datos.get("payer") or {}
+    email = os.getenv("MP_PAYER_EMAIL_PRUEBA") or payer_recibido.get("email")
     if not email:
-        raise Exception("Falta el correo del comprador")
+        raise Exception("Mercado Pago no recibió el correo del comprador.")
 
-    headers = {**_mp_headers(), "X-Idempotency-Key": str(uuid.uuid4())}
-    monto = f"{round(total, 2):.2f}"
+    monto = round(float(total), 2)
     body = {
-        "type": "online",
-        "processing_mode": "automatic",
-        "total_amount": monto,
+        "transaction_amount": monto,
+        "token": datos["token"],
+        "description": f"FACC Music - Pedido #{pedido_id}",
+        "installments": int(datos.get("installments") or 1),
+        "payment_method_id": datos["payment_method_id"],
         "external_reference": str(pedido_id),
         "payer": {"email": email},
-        "transactions": {
-            "payments": [{
-                "amount": monto,
-                "payment_method": {
-                    "id": datos["payment_method_id"],
-                    "type": datos.get("payment_type_id") or "credit_card",
-                    "token": datos["token"],
-                    "installments": int(datos.get("installments") or 1),
-                },
-            }]
-        },
     }
 
-    r = requests.post(f"{MP_API}/v1/orders", headers=headers, json=body, timeout=30)
+    # Algunos métodos de pago devuelven issuer_id; solo se envía si existe.
+    if datos.get("issuer_id") not in (None, ""):
+        body["issuer_id"] = str(datos["issuer_id"])
+
+    # Mercado Pago puede exigir identificación según el método/país.
+    identificacion = payer_recibido.get("identification") or {}
+    if identificacion.get("type") and identificacion.get("number"):
+        body["payer"]["identification"] = {
+            "type": identificacion["type"],
+            "number": identificacion["number"],
+        }
+
+    headers = {
+        **_mp_headers(),
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": str(uuid.uuid4()),
+    }
     try:
-        d = r.json()
-    except ValueError:
-        d = {}
+        r = requests.post(
+            f"{MP_API}/v1/payments",
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
+        try:
+            d = r.json()
+        except ValueError:
+            d = {}
+    except requests.RequestException as exc:
+        raise Exception("No fue posible conectar con Mercado Pago. Intenta nuevamente.") from exc
 
     if r.status_code not in (200, 201):
-        codigo = _codigo_error_http(d)
-        print("MP orders ERROR HTTP:", r.status_code, "| respuesta:", str(d)[:500], flush=True)
-        raise Exception(mensaje_rechazo(codigo))
-
-    pago, estado_mp, detalle = _extraer_pago(d)
-
-    # La orden puede responder "en proceso" o sin motivo; consultamos el resultado final
-    order_id = d.get("id")
-    intentos = 0
-    while order_id and intentos < 3 and (
-        estado_mp in (None, "created", "processing")
-        or (estado_mp in ("failed", "canceled") and detalle in (None, "", "failed"))
-    ):
-        time.sleep(1)
-        g = requests.get(f"{MP_API}/v1/orders/{order_id}", headers=_mp_headers(), timeout=20)
-        if g.status_code == 200:
-            d = g.json()
-            pago, estado_mp, detalle = _extraer_pago(d)
-        intentos += 1
-
-    # Va a los Logs de Render para ver qué devolvió Mercado Pago en cada intento
-    print("MP orders:", "estado =", estado_mp, "| detalle =", detalle, flush=True)
-
-    if estado_mp == "processed":
-        status = "approved"
-    elif estado_mp in ("failed", "canceled", "expired"):
-        status = "rejected"
-    else:
-        status = "in_process"
+        cause = d.get("cause") or []
+        detalle = cause[0].get("description") if cause and isinstance(cause[0], dict) else None
+        mensaje = detalle or d.get("message") or r.text[:250]
+        raise Exception(f"Mercado Pago rechazó la solicitud: {mensaje}")
 
     return {
-        "id": str(d.get("id") or pago.get("id")),
-        "status": status,
-        "status_detail": detalle,
+        "id": str(d.get("id", "")),
+        "status": d.get("status", "unknown"),
+        "status_detail": d.get("status_detail"),
         "reference_id": d.get("external_reference"),
-        "monto": float(pago.get("paid_amount") or pago.get("amount") or d.get("total_amount") or total),
-        "moneda": d.get("currency", MONEDA),
+        "monto": float(d.get("transaction_amount") or 0),
+        "moneda": d.get("currency_id"),
     }
-
 
 # ---- B) Checkout Pro (redirige a la página de Mercado Pago) ----
 
