@@ -489,10 +489,17 @@ class Mutation:
             if r["status"] != "PENDIENTE":
                 raise Exception("Este pedido ya no está pendiente de pago")
             # El total sale de la BD, no de lo que mande el formulario
-            pago = payments.mp_cobrar_tarjeta(r["id"], float(r["total"]), datos)
+            pago = payments.mp_cobrar_tarjeta(
+                r["id"], float(r["total"]), datos
+            )
+
             if pago["status"] != "approved":
                 detalle = pago["status_detail"] or pago["status"]
-                raise Exception(payments.mensaje_rechazo(detalle))
+                raise Exception(
+                    "Mercado Pago no aprobó el pago: "
+                    "{MENSAJES_RECHAZO_MP.get(detalle, detalle)}"
+                )
+            
             validar_monto(r, pago)
             return marcar_pagado(conn, pedido_id, pago["id"])
         finally:
