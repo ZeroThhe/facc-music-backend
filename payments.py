@@ -3,6 +3,7 @@ Pasarelas de pago (PayPal y Mercado Pago) — lado servidor.
 Las llaves SECRETAS viven solo en el .env del backend (o en Environment de Render).
 El servidor calcula el total desde la BD y VERIFICA con la pasarela el pago real.
 """
+import json
 import os
 import time
 import uuid
@@ -155,6 +156,42 @@ def mensaje_rechazo(codigo) -> str:
     return f"Mercado Pago rechazó el pago (código: {c})."
 
 
+_GENERICOS = {"failed", "rejected", "processed", "processing", "created", "canceled", "expired", "unknown", ""}
+
+
+def _buscar_codigo(obj):
+    """Busca en TODA la respuesta de Mercado Pago algún código de rechazo conocido."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            r = _buscar_codigo(v)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _buscar_codigo(v)
+            if r:
+                return r
+    elif isinstance(obj, str):
+        c = obj.strip().lower()
+        if c in MENSAJES_RECHAZO_MP and c not in ("in_process",):
+            return c
+    return None
+
+
+def _respuesta_para_log(d: dict) -> str:
+    """JSON de la respuesta sin tokens, para revisar en los Logs de Render."""
+    def limpiar(o):
+        if isinstance(o, dict):
+            return {k: ("***" if k in ("token", "card_token") else limpiar(v)) for k, v in o.items()}
+        if isinstance(o, list):
+            return [limpiar(v) for v in o]
+        return o
+    try:
+        return json.dumps(limpiar(d), ensure_ascii=False)[:1800]
+    except Exception:
+        return str(d)[:1800]
+
+
 def _extraer_pago(d: dict):
     """Devuelve (pago, estado, detalle) de la respuesta de una orden."""
     pago = ((d.get("transactions") or {}).get("payments") or [{}])[0]
@@ -232,8 +269,13 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
             pago, estado_mp, detalle = _extraer_pago(d)
         intentos += 1
 
+    # Si el motivo no viene en el campo normal, lo buscamos en toda la respuesta
+    if str(detalle or "").lower() in _GENERICOS:
+        detalle = _buscar_codigo(d) or detalle
+
     # Va a los Logs de Render para ver qué devolvió Mercado Pago en cada intento
     print("MP orders:", "estado =", estado_mp, "| detalle =", detalle, flush=True)
+    print("MP orders respuesta:", _respuesta_para_log(d), flush=True)
 
     if estado_mp == "processed":
         status = "approved"
