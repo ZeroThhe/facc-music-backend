@@ -277,6 +277,10 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
     print("MP orders:", "estado =", estado_mp, "| detalle =", detalle, flush=True)
     print("MP orders respuesta:", _respuesta_para_log(d), flush=True)
 
+    # Modo depuración: con MP_DEBUG=1 en Render, el error muestra la respuesta cruda
+    if os.getenv("MP_DEBUG") and estado_mp != "processed":
+        raise Exception(f"[DEBUG] estado={estado_mp} | detalle={detalle} | respuesta={_respuesta_para_log(d)[:900]}")
+
     if estado_mp == "processed":
         status = "approved"
     elif estado_mp in ("failed", "canceled", "expired"):
