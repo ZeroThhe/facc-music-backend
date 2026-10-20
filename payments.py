@@ -201,7 +201,23 @@ def _extraer_pago(d: dict):
 
 
 def _codigo_error_http(d: dict):
+    """Código de rechazo cuando Orders responde con error HTTP (p. ej. 402).
+    Mercado Pago lo manda en errors[0].details como 'PAY123...: insufficient_amount'."""
     errores = d.get("errors") or []
+    for e in errores:
+        for det in (e.get("details") or []):
+            if isinstance(det, str) and ":" in det:
+                c = det.rsplit(":", 1)[1].strip().lower()
+                if c:
+                    return c
+    data = d.get("data") or {}
+    if data:
+        _, _, detalle = _extraer_pago(data)
+        if detalle and str(detalle).lower() not in _GENERICOS:
+            return detalle
+    c = _buscar_codigo(d)
+    if c:
+        return c
     if errores:
         return errores[0].get("code") or errores[0].get("message")
     return d.get("message")
