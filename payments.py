@@ -117,8 +117,7 @@ MENSAJES_RECHAZO_MP = {
     "card_insufficient_amount": "Rechazado por importe insuficiente.",
     "cc_rejected_insufficient_amount": "Rechazado por importe insuficiente.",
     # SECU / EXPI / FORM / CARD
-    "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento o número de tarjeta).",
-    "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
+   "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento, número de tarjeta o datos del titular).",    "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
     "cc_rejected_bad_filled_date": "Rechazado por un problema con la fecha de vencimiento.",
     "cc_rejected_bad_filled_other": "Rechazado por un error en el formulario.",
     "cc_rejected_bad_filled_card_number": "Rechazado: falta o es inválido el número de tarjeta.",
