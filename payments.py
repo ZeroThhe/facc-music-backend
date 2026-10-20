@@ -5,6 +5,7 @@ El servidor calcula el total desde la BD y VERIFICA con la pasarela el pago real
 """
 import json
 import os
+import re
 import time
 import uuid
 import requests
@@ -99,8 +100,8 @@ def _mp_headers() -> dict:
 MENSAJES_RECHAZO_MP = {
     # OTHE
     "cc_rejected_other_reason": "Rechazado por error general.",
-    "rejected_by_issuer": "Rechazado por error general (el banco emisor rechazó el pago).",
-    "processing_error": "Rechazado por error general (error de procesamiento).",
+    "rejected_by_issuer": "Rechazado por error general: el banco emisor rechazó el pago (puede ser tarjeta en lista negra o no soportada).",
+    "processing_error": "Rechazado por error de procesamiento (puede ser un pago duplicado). Espera unos minutos e inténtalo de nuevo.",
     # CONT (pendiente)
     "in_process": "Pendiente de pago: el pago aún se está procesando.",
     "pending_review_manual": "Pendiente de pago: el pago está en revisión manual.",
@@ -116,14 +117,14 @@ MENSAJES_RECHAZO_MP = {
     "card_insufficient_amount": "Rechazado por importe insuficiente.",
     "cc_rejected_insufficient_amount": "Rechazado por importe insuficiente.",
     # SECU / EXPI / FORM / CARD
-    "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento, número de tarjeta o error de formulario).",
+    "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento o número de tarjeta).",
     "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
     "cc_rejected_bad_filled_date": "Rechazado por un problema con la fecha de vencimiento.",
     "cc_rejected_bad_filled_other": "Rechazado por un error en el formulario.",
     "cc_rejected_bad_filled_card_number": "Rechazado: falta o es inválido el número de tarjeta.",
     "cc_rejected_form_error": "Rechazado por un error en el formulario.",
     "cc_rejected_card_error": "Rechazado: falta o es inválido el número de tarjeta.",
-    "invalid_card_token": "Rechazado: el token de la tarjeta no es válido. Vuelve a llenar el formulario.",
+    "invalid_card_token": "Rechazado por tipo de tarjeta no permitida o token de tarjeta inválido. Vuelve a llenar el formulario o usa otra tarjeta.",
     # INST
     "invalid_installments": "Rechazado por cuotas inválidas.",
     "cc_rejected_invalid_installments": "Rechazado por cuotas inválidas.",
@@ -192,6 +193,29 @@ def _respuesta_para_log(d: dict) -> str:
         return str(d)[:1800]
 
 
+_TIPOS_MP = {}   # caché: id del método de pago -> payment_type_id
+
+
+def _tipo_pago(payment_method_id: str, indicado=None) -> str:
+    """credit_card / debit_card / prepaid_card. El Brick de tarjetas de débito
+    no manda el tipo, así que lo consultamos a Mercado Pago (con respaldo por nombre)."""
+    if indicado in ("credit_card", "debit_card", "prepaid_card"):
+        return indicado
+    pid = str(payment_method_id).lower()
+    if pid not in _TIPOS_MP:
+        try:
+            r = requests.get(f"{MP_API}/v1/payment_methods", headers=_mp_headers(), timeout=15)
+            if r.status_code == 200:
+                for m in r.json():
+                    if m.get("id") and m.get("payment_type_id"):
+                        _TIPOS_MP[str(m["id"]).lower()] = m["payment_type_id"]
+        except requests.RequestException:
+            pass
+    if pid in _TIPOS_MP:
+        return _TIPOS_MP[pid]
+    return "debit_card" if pid.startswith("deb") else "credit_card"
+
+
 def _extraer_pago(d: dict):
     """Devuelve (pago, estado, detalle) de la respuesta de una orden."""
     pago = ((d.get("transactions") or {}).get("payments") or [{}])[0]
@@ -202,25 +226,34 @@ def _extraer_pago(d: dict):
 
 def _codigo_error_http(d: dict):
     """Código de rechazo cuando Orders responde con error HTTP (p. ej. 402).
-    Mercado Pago lo manda en errors[0].details como 'PAY123...: insufficient_amount'."""
+    Un rechazo de pago viene en errors[0].details como 'PAY123...: insufficient_amount'.
+    Los errores de validación (campos mal enviados) NO tienen ese formato y regresan None."""
     errores = d.get("errors") or []
     for e in errores:
         for det in (e.get("details") or []):
             if isinstance(det, str) and ":" in det:
-                c = det.rsplit(":", 1)[1].strip().lower()
-                if c:
-                    return c
+                izq, der = det.split(":", 1)
+                if re.fullmatch(r"PAY[0-9A-Z]{10,}", izq.strip()) and der.strip():
+                    return der.strip().lower()
     data = d.get("data") or {}
     if data:
         _, _, detalle = _extraer_pago(data)
         if detalle and str(detalle).lower() not in _GENERICOS:
             return detalle
-    c = _buscar_codigo(d)
-    if c:
-        return c
-    if errores:
-        return errores[0].get("code") or errores[0].get("message")
-    return d.get("message")
+    return _buscar_codigo(d)
+
+
+def _texto_error(d: dict) -> str:
+    """Texto legible de un error de validación de Mercado Pago."""
+    partes = []
+    for e in (d.get("errors") or []):
+        if e.get("message"):
+            partes.append(str(e["message"]))
+        for det in (e.get("details") or []):
+            partes.append(str(det))
+    if not partes and d.get("message"):
+        partes.append(str(d["message"]))
+    return " | ".join(partes)[:300] or "respuesta sin detalle"
 
 
 # ---- A) Tarjeta dentro de la página (Bricks + API Orders) ----
@@ -236,6 +269,9 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
 
     headers = {**_mp_headers(), "X-Idempotency-Key": str(uuid.uuid4())}
     monto = f"{round(total, 2):.2f}"
+    tipo = _tipo_pago(datos["payment_method_id"], datos.get("payment_type_id"))
+    cuotas = int(datos.get("installments") or 1)
+    print("MP orders enviando:", "metodo =", datos["payment_method_id"], "| tipo =", tipo, "| cuotas =", cuotas, flush=True)
     body = {
         "type": "online",
         "processing_mode": "automatic",
@@ -247,9 +283,9 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
                 "amount": monto,
                 "payment_method": {
                     "id": datos["payment_method_id"],
-                    "type": datos.get("payment_type_id") or "credit_card",
+                    "type": tipo,
                     "token": datos["token"],
-                    "installments": int(datos.get("installments") or 1),
+                    "installments": cuotas,
                 },
             }]
         },
@@ -266,8 +302,10 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
 
     if r.status_code not in (200, 201):
         codigo = _codigo_error_http(d)
-        print("MP orders ERROR HTTP:", r.status_code, "| respuesta:", str(d)[:500], flush=True)
-        raise Exception(mensaje_rechazo(codigo))
+        print("MP orders ERROR HTTP:", r.status_code, "| respuesta:", str(d)[:1500], flush=True)
+        if codigo:
+            raise Exception(mensaje_rechazo(codigo))
+        raise Exception(f"Mercado Pago no pudo procesar la solicitud: {_texto_error(d)}")
 
     pago, estado_mp, detalle = _extraer_pago(d)
 
