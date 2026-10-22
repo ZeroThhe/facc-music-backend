@@ -599,7 +599,11 @@ class Mutation:
         r = conn.execute("UPDATE pedidos SET status = %s WHERE id = %s RETURNING *", (status, id)).fetchone()
         conn.commit()
         conn.close()
-        return fila_a_pedido(r) if r else None
+        if not r:
+            return None
+        pedido = fila_a_pedido(r)
+        bus.publish("pedido", pedido)  # avisa en vivo a todos los paneles de admin abiertos
+        return pedido
 
 @strawberry.type
 class Subscription:
