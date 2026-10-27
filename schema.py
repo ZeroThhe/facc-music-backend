@@ -1,6 +1,6 @@
 """
-Schema SDL GraphQL para FACC Music (PWII - Práctica P2-6)
-Materia: Programación Web 2 · Profesor: Kegovc
+Schema SDL GraphQL para FACC Music (PWII - Practica P2-6)
+Materia: Programacion Web 2 Profesor: Kegovc
 """
 
 import enum
@@ -84,6 +84,13 @@ class Producto:
 class ProductoPaginado:
     total: int
     productos: List[Producto]
+
+@strawberry.type(description="Cambio en el catálogo: alta, edición o baja de un producto")
+class CambioCatalogo:
+    tipo: str  # CREADO | ACTUALIZADO | ELIMINADO
+    id: int
+    producto: Optional[Producto] = None
+
 
 @strawberry.type(description="Entidad Usuario")
 class Usuario:
@@ -247,6 +254,9 @@ def marcar_pagado(conn, pedido_id: int, referencia: str):
                 [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", d["cantidad"]]}]}}}]
             )
             doc = productos.find_one({"id": d["producto_id"]})
+            if doc:
+                bus.publish("catalogo", CambioCatalogo(
+                    tipo="ACTUALIZADO", id=doc["id"], producto=producto_desde_doc(doc)))
             if doc and doc["stock"] <= 5:
                 bus.publish("stock_bajo", producto_desde_doc(doc))
 
@@ -391,7 +401,7 @@ class Mutation:
             "destacado": input.destacado,
             "categoria_id": input.categoria_id,
         })
-        return Producto(
+        nuevo = Producto(
             id=new_id,
             nombre=input.nombre,
             artista=input.artista,
@@ -402,6 +412,8 @@ class Mutation:
             destacado=input.destacado,
             categoria_id=input.categoria_id
         )
+        bus.publish("catalogo", CambioCatalogo(tipo="CREADO", id=new_id, producto=nuevo))
+        return nuevo
 
     @strawberry.mutation(description="Actualizar los datos de un producto existente", permission_classes=[IsAdmin])
     def actualizar_producto(self, id: int, input: ProductoInput) -> Optional[Producto]:
@@ -417,7 +429,7 @@ class Mutation:
         }})
         if res.matched_count == 0:
             return None
-        return Producto(
+        actualizado = Producto(
             id=id,
             nombre=input.nombre,
             artista=input.artista,
@@ -428,11 +440,16 @@ class Mutation:
             destacado=input.destacado,
             categoria_id=input.categoria_id
         )
+        bus.publish("catalogo", CambioCatalogo(tipo="ACTUALIZADO", id=id, producto=actualizado))
+        return actualizado
 
     @strawberry.mutation(description="Eliminar un producto del catálogo por su ID", permission_classes=[IsAdmin])
     def eliminar_producto(self, id: int) -> bool:
         res = get_mongo().productos.delete_one({"id": id})
-        return res.deleted_count > 0
+        if res.deleted_count > 0:
+            bus.publish("catalogo", CambioCatalogo(tipo="ELIMINADO", id=id))
+            return True
+        return False
 
     @strawberry.mutation(
         description="Crear el pedido en estado PENDIENTE (aún sin pagar). Precios y total los calcula el servidor.",
@@ -616,6 +633,11 @@ class Subscription:
     async def stock_bajo(self) -> AsyncGenerator[Producto, None]:
         async for producto in bus.subscribe("stock_bajo"):
             yield producto
+
+    @strawberry.subscription(description="Alta, edición o baja de productos (pública: no requiere sesión)")
+    async def catalogo_actualizado(self) -> AsyncGenerator[CambioCatalogo, None]:
+        async for cambio in bus.subscribe("catalogo"):
+            yield cambio
 
 
 schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)
