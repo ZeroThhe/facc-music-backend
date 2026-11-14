@@ -41,7 +41,11 @@ app.add_middleware(
 
 # 4. Integrar el Router de Strawberry GraphQL en /graphql
 # context_getter=get_context expone info.context["user"] a cada resolver protegido
-graphql_app = GraphQLRouter(schema, context_getter=get_context)
+graphql_app = GraphQLRouter(
+    schema,
+    context_getter=get_context,
+    allowed_origins=["https://migracionastro.netlify.app", "http://localhost:4321"],
+)
 app.include_router(graphql_app, prefix="/graphql")
 
 
