@@ -117,7 +117,8 @@ MENSAJES_RECHAZO_MP = {
     "card_insufficient_amount": "Rechazado por importe insuficiente.",
     "cc_rejected_insufficient_amount": "Rechazado por importe insuficiente.",
     # SECU / EXPI / FORM / CARD
-   "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento, número de tarjeta o datos del titular).",    "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
+    "bad_filled_card_data": "Rechazado por datos de tarjeta incorrectos (código de seguridad, fecha de vencimiento o número de tarjeta).",
+    "cc_rejected_bad_filled_security_code": "Rechazado por código de seguridad inválido.",
     "cc_rejected_bad_filled_date": "Rechazado por un problema con la fecha de vencimiento.",
     "cc_rejected_bad_filled_other": "Rechazado por un error en el formulario.",
     "cc_rejected_bad_filled_card_number": "Rechazado: falta o es inválido el número de tarjeta.",
@@ -290,14 +291,29 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
         },
     }
 
-    try:
-        r = requests.post(f"{MP_API}/v1/orders", headers=headers, json=body, timeout=30)
+    # Débito y prepago no llevan cuotas
+    if tipo != "credit_card":
+        body["transactions"]["payments"][0]["payment_method"].pop("installments", None)
+
+    def _enviar(cuerpo, llaves):
         try:
-            d = r.json()
-        except ValueError:
-            d = {}
-    except requests.RequestException as exc:
-        raise Exception("No fue posible conectar con Mercado Pago. Intenta nuevamente.") from exc
+            resp = requests.post(f"{MP_API}/v1/orders", headers=llaves, json=cuerpo, timeout=30)
+            try:
+                datos_resp = resp.json()
+            except ValueError:
+                datos_resp = {}
+            return resp, datos_resp
+        except requests.RequestException as exc:
+            raise Exception("No fue posible conectar con Mercado Pago. Intenta nuevamente.") from exc
+
+    r, d = _enviar(body, headers)
+
+    # Si Mercado Pago objeta el campo 'installments', se reintenta una vez sin él
+    # (llave de idempotencia nueva, porque el primer intento no creó ninguna orden)
+    if r.status_code not in (200, 201) and "installments" in str(d).lower():
+        print("MP orders: Mercado Pago objeto 'installments'; reintentando sin ese campo", flush=True)
+        body["transactions"]["payments"][0]["payment_method"].pop("installments", None)
+        r, d = _enviar(body, {**_mp_headers(), "X-Idempotency-Key": str(uuid.uuid4())})
 
     if r.status_code not in (200, 201):
         codigo = _codigo_error_http(d)
