@@ -310,7 +310,12 @@ def mp_cobrar_tarjeta(pedido_id: int, total: float, datos: dict) -> dict:
 
     # Si Mercado Pago objeta el campo 'installments', se reintenta una vez sin él
     # (llave de idempotencia nueva, porque el primer intento no creó ninguna orden)
-    if r.status_code not in (200, 201) and "installments" in str(d).lower():
+    # OJO: solo si es un error de FORMATO (400/422). Un rechazo del pago (402) tambien menciona
+    # 'installments' en su respuesta, pero ahi el token ya se uso y NO se debe reintentar.
+    texto_error = str(d).lower()
+    if (r.status_code in (400, 422)
+            and "additionalproperties" in texto_error
+            and "installments" in texto_error):
         print("MP orders: Mercado Pago objeto 'installments'; reintentando sin ese campo", flush=True)
         body["transactions"]["payments"][0]["payment_method"].pop("installments", None)
         r, d = _enviar(body, {**_mp_headers(), "X-Idempotency-Key": str(uuid.uuid4())})
