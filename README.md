@@ -110,3 +110,13 @@ El usuario sale del token y los precios los toma el servidor de MongoDB.
 3. Flujo Mercado Pago: `registrarPedido` → `crearPagoMercadoPago(pedidoId)` (regresa URL) → el comprador paga y regresa → `confirmarPagoMercadoPago(pedidoId, paymentId)`.
 
 El servidor consulta a la pasarela, verifica monto, moneda y pedido, y solo entonces marca **PAGADO** (PostgreSQL) y descuenta stock (MongoDB).
+
+## APIs de terceros
+
+| API | Archivo | Variables en `.env` |
+|---|---|---|
+| Discogs (buscar y solicitar álbumes) | `discogs.py` | `DISCOGS_TOKEN` |
+| Mercado Pago (pagos) | `payments.py` | `MP_ACCESS_TOKEN`, `MP_PUBLIC_KEY` |
+| Google Maps (mapa de entrega) | `schema.py` → `googleMapsKey` | `GOOGLE_MAPS_KEY` |
+| Gmail (correos al cliente) | `correo.py` | `GMAIL_USER`, `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` |
+| Autenticación (JWT + OAuth2) | `auth.py`, `/token` | `JWT_SECRET` |

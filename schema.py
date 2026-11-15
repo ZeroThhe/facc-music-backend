@@ -11,6 +11,10 @@ import re
 from database import get_db_connection, get_mongo
 from auth import hash_password, IsAuthenticated, IsAdmin
 import payments
+import discogs
+import correo
+import datetime
+import os
 from strawberry.scalars import JSON
 from events import bus
 
@@ -197,6 +201,26 @@ class ConfigPagos:
     moneda: str
 
 
+@strawberry.type(description="Álbum encontrado en la API de Discogs")
+class AlbumDiscogs:
+    discogs_id: int
+    titulo: str
+    anio: str
+    pais: str
+    formato: str
+    portada: str
+
+
+@strawberry.type(description="Álbum que un cliente pidió (lo buscó en Discogs y no está en la tienda)")
+class SolicitudAlbum:
+    discogs_id: int
+    titulo: str
+    portada: str
+    usuario: str
+    email: str
+    fecha: str
+
+
 METODOS_PAGO = ["PayPal", "Mercado Pago"]
 
 # Mensajes claros para los rechazos más comunes de Mercado Pago (status_detail)
@@ -236,6 +260,11 @@ def pedido_pendiente_del_usuario(conn, pedido_id: int, user: dict, metodo: str):
     return r
 
 
+def cliente_del_pedido(conn, usuario_id: int):
+    """Nombre y correo del cliente (para mandarle correos)."""
+    return conn.execute("SELECT nombre, email FROM usuarios WHERE id = %s", (usuario_id,)).fetchone()
+
+
 def marcar_pagado(conn, pedido_id: int, referencia: str):
     """PENDIENTE -> PAGADO y descuenta stock en MongoDB.
     El WHERE status='PENDIENTE' garantiza que el stock se descuente una sola vez."""
@@ -263,6 +292,9 @@ def marcar_pagado(conn, pedido_id: int, referencia: str):
     pedido = fila_a_pedido(conn.execute("SELECT * FROM pedidos WHERE id = %s", (pedido_id,)).fetchone())
     if cambio:
         bus.publish("pedido", pedido)
+        c = cliente_del_pedido(conn, pedido.usuario_id)
+        if c:
+            correo.correo_pedido_pagado(c["email"], c["nombre"], pedido)  # API de Gmail
     return pedido
 
 
@@ -359,6 +391,22 @@ class Query:
         ]
 
 
+    @strawberry.field(description="Llave pública de Google Maps (Maps Embed API) para el mapa de entrega")
+    def google_maps_key(self) -> str:
+        return os.getenv("GOOGLE_MAPS_KEY", "")
+
+    # ---------------- DISCOGS ----------------
+
+    @strawberry.field(description="Buscar álbumes en Discogs por artista o título")
+    def buscar_discogs(self, texto: str) -> List[AlbumDiscogs]:
+        return [AlbumDiscogs(**a) for a in discogs.buscar_albumes(texto)]
+
+    @strawberry.field(description="(Admin) Álbumes que los clientes han solicitado", permission_classes=[IsAdmin])
+    def solicitudes(self) -> List[SolicitudAlbum]:
+        docs = get_mongo().solicitudes.find({}, {"_id": 0}).sort("fecha", -1)
+        return [SolicitudAlbum(**d) for d in docs]
+
+
 @strawberry.type
 class Mutation:
     @strawberry.mutation(
@@ -383,6 +431,7 @@ class Mutation:
             raise Exception("Ese correo ya está registrado")
 
         conn.close()
+        correo.correo_bienvenida(email, datos.nombre.strip())  # API de Gmail
         return Usuario(id=uid, nombre=datos.nombre.strip(), email=email, rol=RolEnum.CLIENTE)
 
     @strawberry.mutation(description="Registrar un nuevo producto en el catálogo", permission_classes=[IsAdmin])
@@ -605,6 +654,24 @@ class Mutation:
         finally:
             conn.close()
 
+    # ---------------- DISCOGS: solicitar un álbum ----------------
+
+    @strawberry.mutation(description="El cliente solicita un álbum que encontró en Discogs", permission_classes=[IsAuthenticated])
+    def solicitar_album(self, info: Info, discogs_id: int, titulo: str, portada: str = "") -> bool:
+        user = info.context["user"]
+        db = get_mongo()
+        if db.solicitudes.find_one({"discogs_id": discogs_id, "email": user["email"]}):
+            raise Exception("Ya habías solicitado este álbum")
+        db.solicitudes.insert_one({
+            "discogs_id": discogs_id,
+            "titulo": titulo,
+            "portada": portada,
+            "usuario": user["nombre"],
+            "email": user["email"],
+            "fecha": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+        return True
+
     # ---------------- ADMIN ----------------
 
     @strawberry.mutation(description="(Admin) Cambiar el estado de un pedido: ENVIADO, ENTREGADO, CANCELADO...",
@@ -615,10 +682,13 @@ class Mutation:
         conn = get_db_connection()
         r = conn.execute("UPDATE pedidos SET status = %s WHERE id = %s RETURNING *", (status, id)).fetchone()
         conn.commit()
+        c = cliente_del_pedido(conn, r["usuario_id"]) if r else None
         conn.close()
         if not r:
             return None
         pedido = fila_a_pedido(r)
+        if c:
+            correo.correo_cambio_estado(c["email"], c["nombre"], pedido)  # API de Gmail
         bus.publish("pedido", pedido)  # avisa en vivo a todos los paneles de admin abiertos
         return pedido
 
